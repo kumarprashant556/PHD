@@ -1,0 +1,58 @@
+# Phase 0 — shared baseline config (v2: text-to-text edition).
+# Every baseline loads this (optionally overlaid with a method-specific YAML).
+#
+# Seq2seq models (Track A — primary, factual evaluation):
+#   google/flan-t5-small   —  80 M   fast smoke tests / CPU
+#   google/flan-t5-base    — 250 M   ← default; good balance for M4 MPS
+#   google/flan-t5-large   — 780 M   full-size (needs ~6 GB)
+#   google/flan-t5-xl      — 3.0 B   needs ≥12 GB
+#   t5-base                — 220 M   base T5 (no instruction tuning)
+#
+# Causal LM models (Track B — comparison baseline):
+#   EleutherAI/pythia-410m — 410 M   set model_type: causal
+#   distilgpt2             —  82 M   smoke tests, set model_type: causal
+#
+# Temporal streaming datasets:
+#   realtime_qa     — weekly news QA 2022–present  ← primary
+#   streaming_qa    — CC-News extractive QA 2007–2021
+#   temporal_wiki   — Wikipedia fact-change QA 2017–2022
+#   cc_news         — raw articles only (causal LM only, model_type: causal)
+#
+# MPS note: float32 is used automatically on MPS (float16 causes NaN on Metal).
+
+dataset: realtime_qa
+model_name: google/flan-t5-base
+model_type: seq2seq          # seq2seq | causal
+max_periods: 4
+max_train_probes: 2000        # cap training probes per period (0 = no cap; 2000 is good default)
+
+# training budget (tuned for flan-t5-base on M4 MPS / 24 GB)
+epochs_per_period: 3
+batch_size: 8
+lr: 2.0e-5
+weight_decay: 0.0
+max_grad_norm: 1.0
+max_seq_len: 256             # encoder input: question + context
+max_answer_len: 32           # decoder target length
+max_new_tokens: 32           # token generation cap during eval
+grad_accum_steps: 4          # effective batch = batch_size × grad_accum_steps (8×4=32)
+warmup_ratio: 0.06           # 6% of total steps for linear LR warmup
+log_every_n_steps: 50        # write loss row to loss_curve.csv every N optimiser steps
+gradient_checkpointing: false # true = recompute activations (saves ~50% VRAM, ~20% slower)
+use_adafactor: false          # true = Adafactor instead of AdamW (3-4× lower optimizer memory)
+
+# eval
+ppl_eval_samples: 300
+ppl_eval_frac: 0.20
+probe_max: 200
+eval_mode: combined          # em | f1 | combined
+em_weight: 0.4               # seq2seq combined = em_weight*EM + f1_weight*F1
+f1_weight: 0.6
+ppl_weight: 0.4              # causal combined = ppl_weight*ppl_score + probe_weight*probe_acc
+probe_weight: 0.6
+ppl_decay: 0.3
+
+# housekeeping
+seed: 42
+device: ""                   # auto-select
+notes: "phase0-v2-seq2seq"

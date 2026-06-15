@@ -1,0 +1,1285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CAPSEL Training UI</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg:      #0d1117; --panel:  #161b22; --panel2: #1c2128;
+  --border:  #21262d; --border2:#30363d;
+  --accent:  #7c6dfa; --accent2:#2ea6ff; --green:#3fb950;
+  --orange:  #f0883e; --red:#f85149; --yellow:#d29922; --pink:#ff7b72;
+  --text:    #e6edf3; --text2:#8b949e; --text3:#6e7681;
+  --mono:    'JetBrains Mono','Cascadia Code','Fira Code','SF Mono',monospace;
+  --sans:    -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --r:8px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;font-family:var(--sans);font-size:13px;color:var(--text);background:var(--bg)}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+/* ── Layout ── */
+#app{display:grid;grid-template-rows:48px 1fr;height:100vh}
+#topbar{background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;padding:0 18px;flex-shrink:0}
+#workspace{display:grid;grid-template-columns:200px 1fr;height:100%;overflow:hidden}
+#sidebar{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+#main{display:flex;flex-direction:column;overflow:hidden}
+
+/* ── Topbar ── */
+.logo{font-weight:800;font-size:14px;display:flex;align-items:center;gap:8px}
+.logo-mark{width:26px;height:26px;border-radius:6px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:900;color:#fff}
+.server-pill{display:flex;align-items:center;gap:6px;padding:3px 10px;border-radius:12px;border:1px solid var(--border);font-size:11px;cursor:default}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--red);flex-shrink:0}
+.dot.ok{background:var(--green)}
+.dot.warn{background:var(--yellow)}
+#tb-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.tb-run-badge{display:none;align-items:center;gap:6px;font-size:11px;padding:3px 10px;border-radius:12px;background:rgba(124,109,250,.15);border:1px solid rgba(124,109,250,.3);color:var(--accent)}
+
+/* ── Sidebar ── */
+.nav-section{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.8px;padding:12px 16px 4px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 16px;cursor:pointer;color:var(--text2);border-left:2px solid transparent;transition:all .15s;font-size:13px}
+.nav-item:hover{color:var(--text);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--text);border-left-color:var(--accent);background:rgba(124,109,250,.07)}
+.nav-icon{font-size:15px;width:20px;text-align:center}
+#sidebar-run{margin-top:auto;padding:12px 14px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);line-height:1.8}
+#sidebar-run a{color:var(--accent);text-decoration:none;font-size:11px}
+
+/* ── Pages ── */
+.page{display:none;flex:1;overflow:hidden;flex-direction:column}
+.page.active{display:flex}
+.ph{padding:14px 22px 10px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0;background:var(--panel)}
+.ph-title{font-size:15px;font-weight:700}
+.ph-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+
+/* ── Buttons ── */
+.btn{padding:5px 14px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text2);font-size:12px;cursor:pointer;font-family:var(--sans);transition:all .15s}
+.btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.btn-primary:hover:not(:disabled){opacity:.85;color:#fff}
+.btn-danger{background:var(--red);border-color:var(--red);color:#fff}
+.btn-success{background:var(--green);border-color:var(--green);color:#fff;font-weight:600}
+.btn-sm{padding:3px 10px;font-size:11px}
+
+/* ── Common layout helpers ── */
+.two-col{display:grid;grid-template-columns:220px 1fr;height:100%;overflow:hidden}
+.left-pane{border-right:1px solid var(--border);overflow-y:auto;padding:14px}
+.right-pane{overflow-y:auto;padding:18px 22px}
+.sec{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.7px;margin:16px 0 8px}
+.sec:first-child{margin-top:0}
+hr.rule{border:none;border-top:1px solid var(--border);margin:14px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+
+/* ── Cards ── */
+.card{border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;transition:all .15s;cursor:pointer}
+.card:hover{border-color:var(--accent)}
+.card.on{border-color:var(--accent);background:rgba(124,109,250,.07)}
+.card.on2{border-color:var(--accent2);background:rgba(46,166,255,.06)}
+.card-name{font-weight:600;font-size:12px;display:flex;align-items:center;gap:6px}
+.card-sub{font-size:11px;color:var(--text3);margin-top:2px}
+.status-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.sd-g{background:var(--green)} .sd-o{background:var(--orange)} .sd-b{background:var(--accent2)}
+
+/* ── Config items ── */
+.cfg-item{display:flex;flex-direction:column;gap:5px}
+.cfg-label{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+.cfg-val{font-size:11px;color:var(--accent);font-weight:700}
+input[type=range]{width:100%;accent-color:var(--accent);cursor:pointer}
+select,.inp{width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px;outline:none;font-family:var(--mono)}
+select:focus,.inp:focus{border-color:var(--accent)}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+.toggle-label{font-size:12px} .toggle-sub{font-size:10px;color:var(--text3)}
+.sw-wrap{position:relative;width:32px;height:18px;flex-shrink:0}
+.sw-wrap input{opacity:0;width:0;height:0}
+.sw{position:absolute;cursor:pointer;inset:0;background:var(--border2);border-radius:18px;transition:.2s}
+.sw::before{content:'';position:absolute;width:12px;height:12px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
+input:checked+.sw{background:var(--accent)}
+input:checked+.sw::before{transform:translateX(14px)}
+
+/* ── Period grid ── */
+.period-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:6px}
+.pcell{border:1px solid var(--border);border-radius:6px;padding:8px;text-align:center;cursor:pointer;transition:all .15s}
+.pcell:hover{border-color:var(--accent)}
+.pcell.on{border-color:var(--accent);background:rgba(124,109,250,.1)}
+.pcell-lbl{font-size:11px;font-weight:600}
+.pcell-sub{font-size:10px;color:var(--text3);margin-top:2px}
+
+/* ── Command bar ── */
+#cmdbar{border-top:1px solid var(--border);background:var(--panel);padding:10px 22px;flex-shrink:0}
+.cmd-row{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.cmd-lbl{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+.cmd-btns{display:flex;gap:6px;margin-left:auto}
+.cmd-box{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--green);overflow-x:auto;white-space:nowrap}
+
+/* ── Monitor ── */
+#mon-body{display:grid;grid-template-columns:1fr 380px;height:100%;overflow:hidden}
+#log-pane{border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+#log-head{padding:8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0}
+#terminal{flex:1;overflow-y:auto;padding:10px 14px;font-family:var(--mono);font-size:11.5px;line-height:1.65;background:#010409}
+.tl{white-space:pre-wrap;word-break:break-all}
+.tl-ok{color:#3fb950} .tl-err{color:#f85149} .tl-warn{color:#d29922}
+.tl-period{color:#79c0ff;font-weight:700} .tl-grow{color:#d2a8ff;font-weight:700} .tl-dim{color:#484f58}
+#charts-pane{overflow-y:auto;padding:14px}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+.stat-box{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px}
+.stat-val{font-size:20px;font-weight:700;color:var(--accent);line-height:1.2}
+.stat-lbl{font-size:10px;color:var(--text3);margin-top:3px}
+.chart-block{margin-bottom:18px}
+.chart-ttl{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px}
+.chart-wrap{position:relative;height:170px}
+.chart-wrap canvas{max-height:170px}
+.evt-log{font-size:11px;font-family:var(--mono);color:var(--text3);min-height:30px;line-height:2}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600}
+.b-run{background:rgba(63,185,80,.15);color:var(--green)}
+.b-stop{background:rgba(248,81,73,.15);color:var(--red)}
+.b-done{background:rgba(124,109,250,.15);color:var(--accent)}
+.b-idle{background:rgba(110,118,129,.12);color:var(--text3)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.pulse{animation:pulse 1.4s infinite}
+
+/* ── Model viz ── */
+#model-body{overflow-y:auto;padding:20px 24px}
+#block-svg-wrap{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);padding:20px;overflow-x:auto;margin-bottom:18px;min-height:160px;display:flex;align-items:center}
+#block-chain-svg{overflow:visible}
+
+/* ── Results ── */
+#res-body{display:grid;grid-template-columns:260px 1fr;height:100%;overflow:hidden}
+#res-tree{border-right:1px solid var(--border);overflow-y:auto;padding:12px}
+#res-detail{overflow-y:auto;padding:16px 20px}
+.ri{border:1px solid var(--border);border-radius:6px;padding:9px 11px;margin-bottom:6px;cursor:pointer;transition:all .15s}
+.ri:hover{border-color:var(--accent)}
+.ri.on{border-color:var(--accent);background:rgba(124,109,250,.07)}
+.ri-name{font-size:12px;font-weight:600;font-family:var(--mono);color:var(--text)}
+.ri-meta{font-size:10px;color:var(--text3);margin-top:3px}
+.fbadge{display:inline-flex;align-items:center;padding:2px 7px;border-radius:8px;font-size:10px;background:var(--panel2);color:var(--text3);margin:2px;border:1px solid var(--border);cursor:pointer;font-family:var(--mono)}
+.fbadge:hover{border-color:var(--accent2);color:var(--accent2)}
+.detail-chart-wrap{height:200px;position:relative;margin-bottom:18px}
+
+/* ── History ── */
+#hist-body{overflow-y:auto;padding:20px 24px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:8px 10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text3);border-bottom:1px solid var(--border)}
+td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.03);font-size:12px}
+tr:hover td{background:rgba(255,255,255,.025);cursor:pointer}
+.mono{font-family:var(--mono);font-size:11px}
+.tag{display:inline-block;padding:2px 7px;border-radius:8px;font-size:10px;font-weight:700}
+.tag-i{background:rgba(124,109,250,.18);color:var(--accent)}
+.tag-b{background:rgba(240,136,62,.15);color:var(--orange)}
+.tag-a{background:rgba(46,166,255,.12);color:var(--accent2)}
+.empty{color:var(--text3);text-align:center;padding:24px;font-size:12px}
+
+/* ── Offline banner ── */
+#offline-banner{display:none;position:fixed;top:48px;left:0;right:0;z-index:100;background:#1e1208;border-bottom:1px solid var(--orange);padding:10px 22px;font-size:12px;color:var(--orange)}
+#offline-banner code{font-family:var(--mono);background:rgba(0,0,0,.3);padding:1px 6px;border-radius:4px;color:var(--yellow)}
+</style>
+</head>
+<body>
+
+<div id="offline-banner">
+  ⚠ Server offline — open a terminal and run:&nbsp;
+  <code>cd "$(dirname "$0")" && pip install fastapi uvicorn pyyaml && python app_server.py</code>
+  &nbsp; then refresh.
+</div>
+
+<div id="app">
+
+<!-- ── Topbar ── -->
+<div id="topbar">
+  <div class="logo">
+    <div class="logo-mark">C</div>
+    CAPSEL Training UI
+  </div>
+  <div class="server-pill">
+    <div class="dot" id="srv-dot"></div>
+    <span id="srv-lbl">Connecting…</span>
+  </div>
+
+  <div id="tb-right">
+    <div class="tb-run-badge" id="tb-run-badge">
+      <div class="dot ok pulse" id="tb-run-dot"></div>
+      <span id="tb-run-lbl">No run</span>
+    </div>
+    <button class="btn btn-sm" onclick="nav('monitor')" id="tb-mon-btn" style="display:none">Monitor →</button>
+  </div>
+</div>
+
+<!-- ── Workspace ── -->
+<div id="workspace">
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <div class="nav-section">Workflow</div>
+  <div class="nav-item active" data-page="launch" onclick="nav('launch')"><span class="nav-icon">🚀</span>Launch</div>
+  <div class="nav-item" data-page="monitor" onclick="nav('monitor')"><span class="nav-icon">📊</span>Monitor</div>
+  <div class="nav-item" data-page="model" onclick="nav('model')"><span class="nav-icon">🧠</span>Model</div>
+  <div class="nav-item" data-page="results" onclick="nav('results')"><span class="nav-icon">📁</span>Results</div>
+  <div class="nav-item" data-page="history" onclick="nav('history')"><span class="nav-icon">📋</span>History</div>
+  <div id="sidebar-run">No active run</div>
+</div>
+
+<!-- Main -->
+<div id="main">
+
+<!-- ══════════════════ LAUNCH ══════════════════ -->
+<div class="page active" id="page-launch">
+  <div class="ph">
+    <span class="ph-title">🚀 Launch Training</span>
+    <span style="font-size:11px;color:var(--text3);margin-left:8px">Configure → Run in VS Code terminal</span>
+  </div>
+
+  <div class="two-col" style="flex:1">
+    <!-- Left: dataset + model type -->
+    <div class="left-pane">
+      <div class="sec">Dataset</div>
+      <div id="ds-list"></div>
+
+      <div class="sec">Model type</div>
+      <div style="display:flex;flex-direction:column;gap:6px" id="mtype-list"></div>
+    </div>
+
+    <!-- Right: config -->
+    <div class="right-pane">
+      <!-- Periods -->
+      <div class="sec">Periods to train</div>
+      <div class="period-grid" id="period-grid"></div>
+      <hr class="rule">
+
+      <!-- INCA selector -->
+      <div id="cfg-inca">
+        <div class="sec">INCA Selector</div>
+        <div class="grid2" id="sel-grid"></div>
+        <hr class="rule">
+      </div>
+
+      <!-- Baseline mode -->
+      <div id="cfg-baseline" style="display:none">
+        <div class="sec">Baseline mode</div>
+        <div class="grid2" id="baseline-grid"></div>
+        <hr class="rule">
+      </div>
+
+      <!-- Ablation -->
+      <div id="cfg-ablation" style="display:none">
+        <div class="sec">Ablation suite</div>
+        <div class="grid2" id="abl-grid"></div>
+        <hr class="rule">
+      </div>
+
+      <!-- Hyperparams -->
+      <div class="sec">Hyperparameters</div>
+      <div class="grid2" style="row-gap:14px">
+
+        <div class="cfg-item">
+          <div class="cfg-label">Base model</div>
+          <select onchange="S.model_name=this.value;buildCmd()">
+            <option value="google/flan-t5-base">flan-t5-base (248M)</option>
+            <option value="google/flan-t5-large">flan-t5-large (780M)</option>
+            <option value="google/flan-t5-xl">flan-t5-xl (3B)</option>
+            <option value="google/flan-t5-xxl">flan-t5-xxl (11B)</option>
+          </select>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Device</div>
+          <select onchange="S.device=this.value;buildCmd()">
+            <option value="auto">Auto-detect</option>
+            <option value="cuda">CUDA (GPU)</option>
+            <option value="mps">MPS (Apple Silicon)</option>
+            <option value="cpu">CPU</option>
+          </select>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Batch size</div>
+          <input type="range" min="4" max="128" step="4" value="32" oninput="S.batch_size=+this.value;setV('v-bs',this.value);buildCmd()">
+          <div class="cfg-val" id="v-bs">32</div>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Samples per period</div>
+          <input type="range" min="1000" max="100000" step="1000" value="20000" oninput="S.n_per_period=+this.value;setV('v-n',Number(this.value).toLocaleString());buildCmd()">
+          <div class="cfg-val" id="v-n">20,000</div>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Epochs per period</div>
+          <input type="range" min="1" max="20" step="1" value="5" oninput="S.epochs_per_period=+this.value;setV('v-ep',this.value);buildCmd()">
+          <div class="cfg-val" id="v-ep">5</div>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">k_eval (saturation check every N steps)</div>
+          <input type="range" min="50" max="1000" step="50" value="200" oninput="S.k_eval=+this.value;setV('v-ke',this.value+' steps');buildCmd()">
+          <div class="cfg-val" id="v-ke">200 steps</div>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Patience</div>
+          <input type="range" min="2" max="20" step="1" value="5" oninput="S.patience=+this.value;setV('v-pa',this.value);buildCmd()">
+          <div class="cfg-val" id="v-pa">5</div>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Max input length</div>
+          <input type="range" min="64" max="512" step="32" value="256" oninput="S.max_input_length=+this.value;setV('v-ml',this.value+' tok');buildCmd()">
+          <div class="cfg-val" id="v-ml">256 tok</div>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Grad accum steps</div>
+          <input type="range" min="1" max="16" step="1" value="1" oninput="S.grad_accum=+this.value;setV('v-ga','×'+this.value+' (eff. '+(S.batch_size*+this.value)+')');buildCmd()">
+          <div class="cfg-val" id="v-ga">×1 (eff. 32)</div>
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Seed</div>
+          <input class="inp" type="number" value="42" min="0" max="9999" oninput="S.seed=+this.value;buildCmd()">
+        </div>
+
+        <div class="cfg-item">
+          <div class="cfg-label">Output directory</div>
+          <input class="inp" type="text" value="results/" oninput="S.out_dir=this.value;buildCmd()">
+        </div>
+
+      </div><!-- /grid2 -->
+
+      <hr class="rule">
+      <div class="sec">Options</div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Gradient checkpointing</div><div class="toggle-sub">~20% slower, saves VRAM</div></div>
+        <label class="sw-wrap"><input type="checkbox" id="chk-gc" onchange="S.gradient_checkpointing=this.checked;buildCmd()"><span class="sw"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Adafactor optimiser</div><div class="toggle-sub">Memory-efficient AdamW alternative</div></div>
+        <label class="sw-wrap"><input type="checkbox" id="chk-af" onchange="S.use_adafactor=this.checked;buildCmd()"><span class="sw"></span></label>
+      </div>
+      <div class="toggle-row">
+        <div><div class="toggle-label">Dry run (validate config only)</div><div class="toggle-sub">Build model but don't train</div></div>
+        <label class="sw-wrap"><input type="checkbox" id="chk-dry" onchange="S.dry_run=this.checked;buildCmd()"><span class="sw"></span></label>
+      </div>
+      <div style="height:20px"></div>
+    </div><!-- /right-pane -->
+  </div><!-- /two-col -->
+
+  <!-- Command bar -->
+  <div id="cmdbar">
+    <div class="cmd-row">
+      <span class="cmd-lbl">Command</span>
+      <div class="cmd-btns">
+        <button class="btn btn-sm" onclick="copyCmd()">Copy</button>
+        <button class="btn btn-sm" onclick="copyYaml()">Copy YAML</button>
+        <button class="btn btn-primary" id="run-btn" onclick="doRun()" disabled>▶ Run in VS Code</button>
+      </div>
+    </div>
+    <div class="cmd-box" id="cmd-box"></div>
+  </div>
+</div><!-- /launch -->
+
+<!-- ══════════════════ MONITOR ══════════════════ -->
+<div class="page" id="page-monitor">
+  <div class="ph">
+    <span class="ph-title">📊 Live Monitor</span>
+    <div class="ph-right">
+      <span class="badge b-idle" id="run-badge">No run</span>
+      <button class="btn btn-sm btn-danger" id="stop-btn" onclick="doStop()" style="display:none">■ Stop</button>
+      <button class="btn btn-sm" onclick="clearLog()">Clear log</button>
+      <button class="btn btn-sm" onclick="scrollBottom()">↓ Bottom</button>
+    </div>
+  </div>
+
+  <div id="mon-body">
+    <!-- Terminal -->
+    <div id="log-pane">
+      <div id="log-head">
+        <span style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.6px">Training Log</span>
+        <span style="font-size:11px;color:var(--text3);margin-left:8px" id="log-run-id"></span>
+        <span style="margin-left:auto;font-size:10px;color:var(--text3)" id="log-line-count">0 lines</span>
+      </div>
+      <div id="terminal">
+        <div class="tl tl-dim">Waiting for a run… start one from the Launch tab.</div>
+      </div>
+    </div>
+
+    <!-- Charts -->
+    <div id="charts-pane">
+      <div class="stat-grid">
+        <div class="stat-box"><div class="stat-val" id="m-step">—</div><div class="stat-lbl">Opt steps</div></div>
+        <div class="stat-box"><div class="stat-val" id="m-loss">—</div><div class="stat-lbl">Loss</div></div>
+        <div class="stat-box"><div class="stat-val" id="m-acc">—</div><div class="stat-lbl">Accuracy</div></div>
+        <div class="stat-box"><div class="stat-val" id="m-blocks">1</div><div class="stat-lbl">INCA blocks</div></div>
+        <div class="stat-box"><div class="stat-val" id="m-period" style="font-size:13px">—</div><div class="stat-lbl">Current period</div></div>
+        <div class="stat-box"><div class="stat-val" id="m-cka">—</div><div class="stat-lbl">CKA (stability)</div></div>
+      </div>
+
+      <div class="chart-block">
+        <div class="chart-ttl">Training loss</div>
+        <div class="chart-wrap"><canvas id="loss-chart"></canvas></div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-ttl">Accuracy (exact match)</div>
+        <div class="chart-wrap"><canvas id="acc-chart"></canvas></div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-ttl">Average loss per period</div>
+        <div class="chart-wrap"><canvas id="period-chart"></canvas></div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-ttl">Block growth events</div>
+        <div class="evt-log" id="evt-log">No growth events yet.</div>
+      </div>
+    </div>
+  </div>
+</div><!-- /monitor -->
+
+<!-- ══════════════════ MODEL ══════════════════ -->
+<div class="page" id="page-model">
+  <div class="ph">
+    <span class="ph-title">🧠 Model Architecture</span>
+    <div class="ph-right">
+      <button class="btn btn-sm" onclick="refreshModel()">↻ Refresh</button>
+    </div>
+  </div>
+  <div id="model-body">
+    <div class="sec">INCA Block Chain (live)</div>
+    <div id="block-svg-wrap">
+      <svg id="block-chain-svg" xmlns="http://www.w3.org/2000/svg" height="140"></svg>
+    </div>
+
+    <div class="sec">Stats</div>
+    <div class="grid4" style="margin-bottom:20px">
+      <div class="stat-box"><div class="stat-val" id="st-blocks">1</div><div class="stat-lbl">Total blocks</div></div>
+      <div class="stat-box"><div class="stat-val" id="st-frozen">0</div><div class="stat-lbl">Frozen blocks</div></div>
+      <div class="stat-box"><div class="stat-val" id="st-sel" style="font-size:13px">S-QKV</div><div class="stat-lbl">Selector</div></div>
+      <div class="stat-box"><div class="stat-val" id="st-model" style="font-size:12px">flan-t5-base</div><div class="stat-lbl">Base model</div></div>
+    </div>
+
+    <div class="sec">Growth history</div>
+    <div id="growth-log" style="font-family:var(--mono);font-size:12px;color:var(--text3);line-height:2">No growth events recorded yet.</div>
+  </div>
+</div><!-- /model -->
+
+<!-- ══════════════════ RESULTS ══════════════════ -->
+<div class="page" id="page-results">
+  <div class="ph">
+    <span class="ph-title">📁 Results</span>
+    <div class="ph-right"><button class="btn btn-sm" onclick="loadResults()">↻ Refresh</button></div>
+  </div>
+  <div id="res-body">
+    <div id="res-tree">
+      <div class="sec" style="margin-top:0">Run directories</div>
+      <div id="res-list"><div class="empty">No results yet.</div></div>
+    </div>
+    <div id="res-detail">
+      <div class="empty" id="res-placeholder">Select a run directory on the left.</div>
+      <div id="res-content" style="display:none">
+        <div class="sec" id="rd-title" style="font-size:13px;text-transform:none;letter-spacing:0;color:var(--text);font-weight:700;margin-top:0">—</div>
+        <div id="rd-files" style="margin-bottom:12px"></div>
+        <div class="sec">Loss curve</div>
+        <div class="detail-chart-wrap"><canvas id="detail-loss-chart"></canvas></div>
+        <div class="sec">Checkpoints</div>
+        <div id="rd-checkpoints" style="font-family:var(--mono);font-size:12px;color:var(--text3)">None.</div>
+      </div>
+    </div>
+  </div>
+</div><!-- /results -->
+
+<!-- ══════════════════ HISTORY ══════════════════ -->
+<div class="page" id="page-history">
+  <div class="ph">
+    <span class="ph-title">📋 Run History</span>
+    <div class="ph-right"><button class="btn btn-sm" onclick="loadHistory()">↻ Refresh</button></div>
+  </div>
+  <div id="hist-body">
+    <table>
+      <thead>
+        <tr>
+          <th>Run ID</th><th>Dataset</th><th>Type</th><th>Selector</th>
+          <th>Seed</th><th>Status</th><th>VS Code</th><th>Started</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="hist-tbody"><tr><td colspan="9" class="empty">No runs yet.</td></tr></tbody>
+    </table>
+  </div>
+</div><!-- /history -->
+
+</div><!-- /main -->
+</div><!-- /workspace -->
+</div><!-- /app -->
+
+<script>
+// ──────────────────────────────────────────────────────────────────────────────
+// Constants
+// ──────────────────────────────────────────────────────────────────────────────
+const API = 'http://localhost:7860/api';
+
+// Text-completion (seq2seq) datasets only. QA/MCQ excluded.
+const DATASETS = {
+  cc_news:      {label:'CC-News',       sub:'4 half-year periods · Phase 1 primary',dot:'g',periods:['2017_H1','2017_H2','2018_H1','2018_H2']},
+  streaming_qa: {label:'StreamingQA',   sub:'26 monthly periods · CC-News corpus',  dot:'g',periods:['2017-01','2017-06','2017-12','2018-06','2018-12']},
+  temporalwiki: {label:'TemporalWiki',  sub:'Wikipedia snapshots · 2 periods',      dot:'g',periods:['period_2022','period_2023']},
+  tic_lm:       {label:'TiC-LM',        sub:'9 daily C4 slices · Paper A',          dot:'g',periods:['period_2019-04-18','period_2019-04-19','period_2019-04-20']},
+  redpajama:    {label:'RedPajama-V2',  sub:'HF streaming · E-ROUTE benchmark',     dot:'o',periods:['2023-06','2022-12','2021-43','2020-24']},
+};
+
+const SELECTORS = [
+  {id:'embedding_query', name:'S-QKV (default)', desc:'Period embedding cross-attention routing'},
+  {id:'uclbr',           name:'UCLBR',           desc:'Unified continual-learning block routing'},
+  {id:'cross_attention', name:'S-FULL',           desc:'Full multi-head cross-attention'},
+  {id:'weighted_sum',    name:'S-WS',             desc:'Learnable per-block weight vector'},
+];
+
+const ABLATIONS = [
+  {id:'e_route',name:'E-ROUTE',desc:'4 selectors × 3 seeds · 12 runs'},
+  {id:'e_sat',  name:'E-SAT',  desc:'rir_threshold × patience · 12 runs'},
+  {id:'e_cls3', name:'E-CLS3', desc:'Replay strategy sweep · 9 runs'},
+  {id:'e_grow', name:'E-GROW', desc:'Growth trigger sensitivity · 10 runs'},
+  {id:'e_prune',name:'E-PRUNE',desc:'Block cap sweep · 8 runs'},
+  {id:'e_scale',name:'E-SCALE',desc:'Model scaling · 6 runs'},
+];
+
+const PERIOD_COLORS = ['#7c6dfa','#2ea6ff','#3fb950','#f0883e','#f85149','#d29922','#79c0ff','#d2a8ff'];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// App state
+// ──────────────────────────────────────────────────────────────────────────────
+const S = {
+  // dataset / config
+  dataset:'cc_news', model_type:'inca', selector:'embedding_query',
+  baseline_mode:'sequential', ablation:'e_route',
+  periods: new Set(['2017_H1','2017_H2','2018_H1','2018_H2','2019_H1','2019_H2']),
+  model_name:'google/flan-t5-base', device:'auto',
+  batch_size:32, n_per_period:20000, epochs_per_period:5,
+  k_eval:200, patience:5, max_input_length:256, grad_accum:1, seed:42,
+  out_dir:'results/',
+  gradient_checkpointing:false, use_adafactor:false, dry_run:false,
+  // run state
+  activeRunId:null, serverOk:false,
+};
+
+// Live metrics buffer
+const M = {
+  step:0, loss:null, acc:null, cka:null,
+  blocks:1, period:null,
+  lossHist:[], accHist:[],  // {step, v}
+  periodSums:{},            // period → {sum, cnt}
+  growEvents:[],
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Chart setup
+// ──────────────────────────────────────────────────────────────────────────────
+Chart.defaults.color = '#6e7681';
+Chart.defaults.borderColor = '#21262d';
+Chart.defaults.font.family = 'inherit';
+
+let lossChart=null, accChart=null, periodChart=null, detailChart=null;
+
+function initCharts() {
+  const commonOpts = (xlabel) => ({
+    animation:false, responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{display:false}},
+    scales:{
+      x:{ticks:{maxTicksLimit:6,font:{size:10}},grid:{color:'#21262d'}},
+      y:{ticks:{maxTicksLimit:5,font:{size:10}},grid:{color:'#21262d'}},
+    },
+  });
+
+  const mkLine = (id, label, color) => {
+    const ctx = document.getElementById(id);
+    if (!ctx) return null;
+    return new Chart(ctx, {
+      type:'line',
+      data:{labels:[],datasets:[{label,data:[],borderColor:color,backgroundColor:color+'18',
+        tension:0.3,pointRadius:0,borderWidth:1.5,fill:true}]},
+      options:commonOpts('Step'),
+    });
+  };
+
+  lossChart = mkLine('loss-chart', 'Loss',     '#7c6dfa');
+  accChart  = mkLine('acc-chart',  'Accuracy', '#3fb950');
+
+  // Period chart — bar type
+  const pCtx = document.getElementById('period-chart');
+  if (pCtx) {
+    periodChart = new Chart(pCtx, {
+      type:'bar',
+      data:{labels:[],datasets:[{label:'Avg loss',data:[],backgroundColor:[],borderColor:[],borderWidth:1}]},
+      options:{...commonOpts('Period'), plugins:{legend:{display:false}}},
+    });
+  }
+}
+
+function pushToChart(chart, step, val, maxPts=600) {
+  if (!chart) return;
+  chart.data.labels.push(step);
+  chart.data.datasets[0].data.push(val);
+  if (chart.data.labels.length > maxPts) {
+    chart.data.labels.shift();
+    chart.data.datasets[0].data.shift();
+  }
+  chart.update('none');
+}
+
+function updatePeriodChart() {
+  if (!periodChart) return;
+  const labels = Object.keys(M.periodSums);
+  const vals   = labels.map(p => (M.periodSums[p].sum / M.periodSums[p].cnt).toFixed(4));
+  const colors = labels.map((_,i) => PERIOD_COLORS[i % PERIOD_COLORS.length]);
+  periodChart.data.labels = labels;
+  periodChart.data.datasets[0].data = vals;
+  periodChart.data.datasets[0].backgroundColor = colors.map(c => c+'88');
+  periodChart.data.datasets[0].borderColor = colors;
+  periodChart.update('none');
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Navigation
+// ──────────────────────────────────────────────────────────────────────────────
+function nav(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  document.querySelector(`[data-page="${page}"]`).classList.add('active');
+  if (page === 'results') loadResults();
+  if (page === 'history') loadHistory();
+  if (page === 'model')   refreshModel();
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Render helpers
+// ──────────────────────────────────────────────────────────────────────────────
+function setV(id, v) { const el=document.getElementById(id); if(el) el.textContent=v; }
+
+function renderDatasets() {
+  document.getElementById('ds-list').innerHTML = Object.entries(DATASETS).map(([id,ds]) => `
+    <div class="card ${id===S.dataset?'on':''}" style="margin-bottom:6px" onclick="selectDs('${id}',this)">
+      <div class="card-name"><span class="status-dot sd-${ds.dot}"></span>${ds.label}</div>
+      <div class="card-sub">${ds.sub}</div>
+    </div>
+  `).join('');
+}
+
+function renderModelTypes() {
+  const types = [
+    {id:'inca',     label:'INCA',     sub:'Saturation-driven block growth', tag:'tag-i'},
+    {id:'baseline', label:'Baseline', sub:'Sequential or joint fine-tuning', tag:'tag-b'},
+    {id:'ablation', label:'Ablation', sub:'Grid sweep over hyperparameters', tag:'tag-a'},
+  ];
+  document.getElementById('mtype-list').innerHTML = types.map(t => `
+    <div class="card ${t.id===S.model_type?'on':''}" onclick="selectMtype('${t.id}',this)">
+      <div class="card-name"><span class="tag ${t.tag}" style="font-size:9px">${t.label}</span></div>
+      <div class="card-sub">${t.sub}</div>
+    </div>
+  `).join('');
+}
+
+function renderPeriods() {
+  const ds = DATASETS[S.dataset];
+  document.getElementById('period-grid').innerHTML = ds.periods.map(p => `
+    <div class="pcell on" onclick="togglePeriod('${p}',this)">
+      <div class="pcell-lbl">${p}</div>
+      <div class="pcell-sub">${(S.n_per_period/1000).toFixed(0)}K</div>
+    </div>
+  `).join('');
+  S.periods = new Set(ds.periods);
+}
+
+function renderSelectors() {
+  document.getElementById('sel-grid').innerHTML = SELECTORS.map(s => `
+    <div class="card ${s.id===S.selector?'on':''}" onclick="selectSel('${s.id}',this)">
+      <div class="card-name">${s.name}</div>
+      <div class="card-sub">${s.desc}</div>
+    </div>
+  `).join('');
+}
+
+function renderBaselines() {
+  const opts = [
+    {id:'sequential',name:'Sequential',sub:'One period at a time (forgetting floor)'},
+    {id:'joint',     name:'Joint',     sub:'All periods merged (upper bound)'},
+  ];
+  document.getElementById('baseline-grid').innerHTML = opts.map(o => `
+    <div class="card ${o.id===S.baseline_mode?'on':''}" onclick="selectBaseline('${o.id}',this)">
+      <div class="card-name">${o.name}</div>
+      <div class="card-sub">${o.sub}</div>
+    </div>
+  `).join('');
+}
+
+function renderAblations() {
+  document.getElementById('abl-grid').innerHTML = ABLATIONS.map(a => `
+    <div class="card ${a.id===S.ablation?'on2':''}" onclick="selectAbl('${a.id}',this)">
+      <div class="card-name" style="color:var(--accent2)">${a.name}</div>
+      <div class="card-sub">${a.desc}</div>
+    </div>
+  `).join('');
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Selection handlers
+// ──────────────────────────────────────────────────────────────────────────────
+function selectDs(id, el) {
+  S.dataset = id;
+  document.querySelectorAll('#ds-list .card').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
+  renderPeriods();
+  buildCmd();
+}
+
+function selectMtype(id, el) {
+  S.model_type = id;
+  document.querySelectorAll('#mtype-list .card').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
+  document.getElementById('cfg-inca').style.display     = id==='inca'     ? '' : 'none';
+  document.getElementById('cfg-baseline').style.display = id==='baseline' ? '' : 'none';
+  document.getElementById('cfg-ablation').style.display = id==='ablation' ? '' : 'none';
+  buildCmd();
+}
+
+function togglePeriod(p, el) {
+  if (S.periods.has(p)) {
+    if (S.periods.size > 1) { S.periods.delete(p); el.classList.remove('on'); }
+  } else {
+    S.periods.add(p); el.classList.add('on');
+  }
+  buildCmd();
+}
+
+function selectSel(id, el) {
+  S.selector = id;
+  document.querySelectorAll('#sel-grid .card').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
+  buildCmd();
+}
+
+function selectBaseline(id, el) {
+  S.baseline_mode = id;
+  document.querySelectorAll('#baseline-grid .card').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
+  buildCmd();
+}
+
+function selectAbl(id, el) {
+  S.ablation = id;
+  document.querySelectorAll('#abl-grid .card').forEach(c => c.classList.remove('on2'));
+  el.classList.add('on2');
+  buildCmd();
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Command builder
+// ──────────────────────────────────────────────────────────────────────────────
+function buildCmd() {
+  let cmd;
+  if (S.model_type === 'ablation') {
+    cmd = `python scripts/run_ablation.py --ablation ${S.ablation} --dataset ${S.dataset}`;
+  } else if (S.model_type === 'baseline') {
+    cmd = `python scripts/train_baseline.py --config configs/inca.yaml --mode ${S.baseline_mode} --dataset ${S.dataset} --seed ${S.seed}`;
+  } else {
+    cmd = `python scripts/train_inca.py --config configs/inca.yaml --dataset ${S.dataset} --selector ${S.selector} --seed ${S.seed}`;
+    if (S.dry_run)         cmd += ' --dry-run';
+    if (S.device !== 'auto') cmd += ` --device ${S.device}`;
+  }
+  setV('cmd-box', cmd);
+  document.getElementById('run-btn').disabled = !S.serverOk;
+  return cmd;
+}
+
+function copyCmd() {
+  navigator.clipboard.writeText(document.getElementById('cmd-box').textContent);
+  flash(event.target, '✓ Copied');
+}
+
+function copyYaml() {
+  const yaml = [
+    `model_name: "${S.model_name}"`,
+    `dataset: "${S.dataset}"`,
+    `selector: "${S.selector}"`,
+    `seed: ${S.seed}`,
+    `n_per_period: ${S.n_per_period}`,
+    `batch_size: ${S.batch_size}`,
+    `epochs_per_period: ${S.epochs_per_period}`,
+    `max_input_length: ${S.max_input_length}`,
+    `k_eval: ${S.k_eval}`,
+    `patience: ${S.patience}`,
+    `gradient_checkpointing: ${S.gradient_checkpointing}`,
+    `use_adafactor: ${S.use_adafactor}`,
+    `out_dir: "${S.out_dir}"`,
+  ].join('\n');
+  navigator.clipboard.writeText(yaml);
+  flash(event.target, '✓ YAML copied');
+}
+
+function flash(btn, msg) {
+  const orig = btn.textContent;
+  btn.textContent = msg;
+  btn.style.color = 'var(--green)';
+  setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1600);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Run / Stop
+// ──────────────────────────────────────────────────────────────────────────────
+async function doRun() {
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true; btn.textContent = 'Launching…';
+
+  const body = {
+    model_type: S.model_type === 'ablation' ? 'inca' : S.model_type,
+    dataset: S.dataset, selector: S.selector, seed: S.seed,
+    model_name: S.model_name, batch_size: S.batch_size,
+    grad_accum: S.grad_accum, epochs_per_period: S.epochs_per_period,
+    max_input_length: S.max_input_length, k_eval: S.k_eval,
+    patience: S.patience, n_per_period: S.n_per_period,
+    gradient_checkpointing: S.gradient_checkpointing,
+    use_adafactor: S.use_adafactor, dry_run: S.dry_run,
+    out_dir: S.out_dir, device: S.device,
+    baseline_mode: S.baseline_mode,
+    ablation: S.model_type === 'ablation' ? S.ablation : null,
+  };
+
+  try {
+    const resp = await fetch(`${API}/run`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const run = await resp.json();
+    S.activeRunId = run.run_id;
+
+    // Reset metrics
+    Object.assign(M, {step:0,loss:null,acc:null,cka:null,blocks:1,period:null,
+      lossHist:[],accHist:[],periodSums:{},growEvents:[]});
+
+    clearLog();
+    const launchMsg = run.vscode_launched
+      ? '✓ Launched in VS Code integrated terminal'
+      : '⚠ VS Code not found — running as subprocess (output streamed here)';
+    appendLog(launchMsg, run.vscode_launched ? 'tl-ok' : 'tl-warn');
+    appendLog(`Command: ${run.command}`, 'tl-dim');
+    appendLog('─'.repeat(60), 'tl-dim');
+
+    startLogStream(run.run_id);
+    startMetricsPoll(run.run_id);
+    setRunStatus('running', run.run_id);
+    showRunInTopbar(run);
+    updateSidebarRun(run);
+    nav('monitor');
+  } catch (e) {
+    appendLog(`Error: ${e}`, 'tl-err');
+  } finally {
+    btn.disabled = !S.serverOk;
+    btn.textContent = '▶ Run in VS Code';
+  }
+}
+
+async function doStop() {
+  if (!S.activeRunId) return;
+  await fetch(`${API}/stop/${S.activeRunId}`, {method:'POST'});
+  setRunStatus('stopped', S.activeRunId);
+  document.getElementById('stop-btn').style.display = 'none';
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Log terminal
+// ──────────────────────────────────────────────────────────────────────────────
+let _sse = null;
+let _lineCount = 0;
+
+function startLogStream(runId) {
+  if (_sse) { _sse.close(); _sse = null; }
+  _lineCount = 0;
+  document.getElementById('log-run-id').textContent = runId.slice(0,22)+'…';
+
+  _sse = new EventSource(`${API}/logs/${runId}`);
+  _sse.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.event === 'done') {
+      setRunStatus('completed', runId);
+      document.getElementById('stop-btn').style.display = 'none';
+      _sse.close(); _sse = null;
+      return;
+    }
+    if (typeof d.line === 'string') {
+      appendLog(d.line);
+      parseLogLine(d.line);
+      _lineCount++;
+      setV('log-line-count', `${_lineCount} lines`);
+    }
+  };
+  _sse.onerror = () => {
+    setRunStatus('completed', runId);
+    document.getElementById('stop-btn').style.display = 'none';
+    if (_sse) { _sse.close(); _sse = null; }
+  };
+}
+
+function appendLog(line, forceCls) {
+  const term = document.getElementById('terminal');
+  const div  = document.createElement('div');
+  div.className = 'tl ' + (forceCls || classifyLine(line));
+  div.textContent = line;
+  term.appendChild(div);
+  // Auto-scroll if near bottom
+  if (term.scrollHeight - term.scrollTop < term.clientHeight + 120)
+    term.scrollTop = term.scrollHeight;
+}
+
+function classifyLine(l) {
+  if (/✓|PERIOD_LEARNED|completed|Training complete/.test(l)) return 'tl-ok';
+  if (/✗|Error|error|Traceback|FAILED/.test(l))               return 'tl-err';
+  if (/BLOCK_FULL|freezing|growing/.test(l))                   return 'tl-grow';
+  if (/^Period\s+\d+\/|period \d+\/\d+/i.test(l))             return 'tl-period';
+  if (/Warning|warn/i.test(l))                                 return 'tl-warn';
+  return '';
+}
+
+function clearLog() {
+  document.getElementById('terminal').innerHTML = '';
+  _lineCount = 0;
+  setV('log-line-count', '0 lines');
+}
+
+function scrollBottom() {
+  const t = document.getElementById('terminal');
+  t.scrollTop = t.scrollHeight;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Live metrics parsing from log lines
+// ──────────────────────────────────────────────────────────────────────────────
+function parseLogLine(line) {
+  // [e0 s200] score=0.1234 cka=0.830 gnorm=0.541 loss=1.2345 → NONE
+  const ms     = line.match(/\[e(\d+)\s+s(\d+)\]/);
+  const mLoss  = line.match(/loss=([\d.]+)/);
+  const mScore = line.match(/score=([\d.]+)/);
+  const mCka   = line.match(/cka=([\d.]+)/);
+  const mPer   = line.match(/Period\s+\d+\/\d+:\s+(\S+)/i);
+  const mBlk   = line.match(/Block chain:\s*(\d+)\s*block/i);
+  const mGrow  = /BLOCK_FULL/i.test(line) || /freeze.*grow/i.test(line);
+
+  if (ms) {
+    M.step = +ms[2];
+    setV('m-step', Number(M.step).toLocaleString());
+  }
+  if (mLoss && ms) {
+    M.loss = parseFloat(mLoss[1]);
+    setV('m-loss', M.loss.toFixed(4));
+    M.lossHist.push({step:M.step, v:M.loss});
+    pushToChart(lossChart, M.step, M.loss);
+    // accumulate period average
+    if (M.period) {
+      if (!M.periodSums[M.period]) M.periodSums[M.period] = {sum:0, cnt:0};
+      M.periodSums[M.period].sum += M.loss;
+      M.periodSums[M.period].cnt += 1;
+      updatePeriodChart();
+    }
+  }
+  if (mScore && ms) {
+    M.acc = parseFloat(mScore[1]);
+    setV('m-acc', M.acc.toFixed(4));
+    M.accHist.push({step:M.step, v:M.acc});
+    pushToChart(accChart, M.step, M.acc);
+  }
+  if (mCka) {
+    M.cka = parseFloat(mCka[1]);
+    setV('m-cka', M.cka.toFixed(3));
+  }
+  if (mPer) {
+    M.period = mPer[1];
+    setV('m-period', M.period);
+  }
+  if (mBlk) {
+    M.blocks = +mBlk[1];
+    setV('m-blocks', M.blocks);
+    renderBlockChain(M.blocks, M.period);
+  }
+  if (mGrow) {
+    const ev = `[Step ${M.step}] BLOCK_FULL → block ${M.blocks} growing`;
+    M.growEvents.push(ev);
+    document.getElementById('evt-log').innerHTML =
+      M.growEvents.slice(-8).map(e => `<div style="color:var(--accent2)">⊕ ${e}</div>`).join('');
+    document.getElementById('growth-log').innerHTML =
+      M.growEvents.map(e => `<div style="color:var(--accent2)">⊕ ${e}</div>`).join('');
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Metrics polling (supplements SSE-parsed data with server-side CSV)
+// ──────────────────────────────────────────────────────────────────────────────
+let _metPoll = null;
+
+function startMetricsPoll(runId) {
+  if (_metPoll) clearInterval(_metPoll);
+  _metPoll = setInterval(async () => {
+    try {
+      const resp = await fetch(`${API}/metrics/${runId}`);
+      if (!resp.ok) return;
+      const d = await resp.json();
+      // Blocks
+      if (d.n_blocks && d.n_blocks !== M.blocks) {
+        M.blocks = d.n_blocks;
+        setV('m-blocks', M.blocks);
+        renderBlockChain(M.blocks, M.period);
+      }
+      // If we have CSV data from file (richer than log parse)
+      if (d.loss_csv && d.loss_csv.length > lossChart?.data?.labels?.length) {
+        const pts = d.loss_csv.slice(-500);
+        if (lossChart) {
+          lossChart.data.labels = pts.map(p => p.step);
+          lossChart.data.datasets[0].data = pts.map(p => p.loss);
+          lossChart.update('none');
+        }
+        // rebuild period averages
+        const sums = {};
+        d.loss_csv.forEach(p => {
+          if (!sums[p.period]) sums[p.period] = {sum:0,cnt:0};
+          sums[p.period].sum += p.loss; sums[p.period].cnt++;
+        });
+        Object.assign(M.periodSums, sums);
+        updatePeriodChart();
+      }
+    } catch (_) {}
+  }, 6000);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Run status helpers
+// ──────────────────────────────────────────────────────────────────────────────
+function setRunStatus(status, runId) {
+  const badge = document.getElementById('run-badge');
+  const map = {running:['b-run','● Running'],stopped:['b-stop','■ Stopped'],
+               completed:['b-done','✓ Completed'],idle:['b-idle','No run']};
+  const [cls, txt] = map[status] || map.idle;
+  badge.className = 'badge ' + cls;
+  badge.textContent = txt;
+  if (status==='running') badge.classList.add('pulse'); else badge.classList.remove('pulse');
+  document.getElementById('stop-btn').style.display = status==='running' ? '' : 'none';
+}
+
+function showRunInTopbar(run) {
+  const badge = document.getElementById('tb-run-badge');
+  badge.style.display = 'flex';
+  document.getElementById('tb-run-lbl').textContent = run.run_id.slice(-10);
+  document.getElementById('tb-mon-btn').style.display = '';
+  const dot = document.getElementById('tb-run-dot');
+  dot.className = 'dot ok pulse';
+}
+
+function updateSidebarRun(run) {
+  const cfg = run.cfg || {};
+  document.getElementById('sidebar-run').innerHTML =
+    `<div style="color:var(--green);font-weight:600;margin-bottom:4px">● Running</div>`+
+    `<div>${cfg.dataset || ''}</div>`+
+    `<div>${cfg.model_type || ''} · ${cfg.selector || ''}</div>`+
+    `<div>Seed ${cfg.seed || ''}</div>`+
+    `<div style="margin-top:6px"><a href="#" onclick="nav('monitor');return false">View monitor →</a></div>`;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Model / Block chain visualization
+// ──────────────────────────────────────────────────────────────────────────────
+function renderBlockChain(nBlocks, currentPeriod) {
+  const svg   = document.getElementById('block-chain-svg');
+  const BW=110, BH=80, gap=36, padX=16;
+  const totalW = padX*2 + nBlocks*(BW+gap) - gap;
+  svg.setAttribute('viewBox', `0 0 ${Math.max(totalW,360)} 140`);
+  svg.setAttribute('width', Math.max(totalW,360));
+  svg.setAttribute('height', 140);
+
+  let h = '';
+  for (let i=0; i<nBlocks; i++) {
+    const x = padX + i*(BW+gap), y = 16;
+    const frozen  = i < nBlocks-1;
+    const fill    = frozen ? '#161b22' : 'rgba(124,109,250,.12)';
+    const stroke  = frozen ? '#30363d' : '#7c6dfa';
+    const textC   = frozen ? '#6e7681' : '#e6edf3';
+    const accentC = frozen ? '#484f58' : '#7c6dfa';
+
+    h += `<rect x="${x}" y="${y}" width="${BW}" height="${BH}" rx="7" fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`;
+    h += `<text x="${x+BW/2}" y="${y+20}" text-anchor="middle" fill="${textC}" font-size="11" font-weight="700" font-family="inherit">Block ${i}</text>`;
+    h += `<text x="${x+BW/2}" y="${y+38}" text-anchor="middle" fill="${accentC}" font-size="10" font-family="inherit">${frozen?'🔒 Frozen':'⚡ Training'}</text>`;
+    h += `<text x="${x+BW/2}" y="${y+55}" text-anchor="middle" fill="${frozen?'#3d444d':'#8b949e'}" font-size="9" font-family="inherit">S-QKV</text>`;
+    if (currentPeriod && !frozen)
+      h += `<text x="${x+BW/2}" y="${y+70}" text-anchor="middle" fill="#3fb95099" font-size="9" font-family="inherit">${currentPeriod}</text>`;
+
+    if (i < nBlocks-1) {
+      const ax = x+BW+2, ay = y+BH/2;
+      h += `<line x1="${ax}" y1="${ay}" x2="${ax+gap-6}" y2="${ay}" stroke="#30363d" stroke-width="1.5"/>`;
+      h += `<polygon points="${ax+gap-6},${ay-4} ${ax+gap+2},${ay} ${ax+gap-6},${ay+4}" fill="#30363d"/>`;
+    }
+  }
+  // Legend
+  const ly = 16+BH+14;
+  h += `<rect x="${padX}" y="${ly}" width="9" height="9" rx="2" fill="#161b22" stroke="#30363d" stroke-width="1"/>`;
+  h += `<text x="${padX+13}" y="${ly+8}" fill="#6e7681" font-size="9" font-family="inherit">Frozen</text>`;
+  h += `<rect x="${padX+56}" y="${ly}" width="9" height="9" rx="2" fill="rgba(124,109,250,.12)" stroke="#7c6dfa" stroke-width="1"/>`;
+  h += `<text x="${padX+69}" y="${ly+8}" fill="#6e7681" font-size="9" font-family="inherit">Active</text>`;
+
+  svg.innerHTML = h;
+  setV('st-blocks', nBlocks);
+  setV('st-frozen', Math.max(0, nBlocks-1));
+}
+
+function refreshModel() {
+  renderBlockChain(M.blocks || 1, M.period);
+  setV('st-sel', (S.selector || '').replace('embedding_query','S-QKV').replace('cross_attention','S-FULL').replace('weighted_sum','S-WS').toUpperCase());
+  setV('st-model', (S.model_name || '').split('/')[1] || S.model_name);
+  document.getElementById('growth-log').innerHTML =
+    M.growEvents.length
+      ? M.growEvents.map(e => `<div style="color:var(--accent2)">⊕ ${e}</div>`).join('')
+      : 'No growth events recorded yet.';
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Results
+// ──────────────────────────────────────────────────────────────────────────────
+async function loadResults() {
+  const list = document.getElementById('res-list');
+  try {
+    const resp = await fetch(`${API}/results`);
+    const data = await resp.json();
+    if (!data.length) { list.innerHTML = '<div class="empty">No results yet.</div>'; return; }
+    list.innerHTML = data.map(r => `
+      <div class="ri" onclick="showResult('${r.name}',this)">
+        <div class="ri-name">${r.name}</div>
+        <div class="ri-meta">${r.files.length} file(s)${r.has_loss?' · loss ✓':''}${r.checkpoints.length?' · '+r.checkpoints.length+' ckpt':''}</div>
+      </div>
+    `).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="empty">Server offline.</div>';
+  }
+}
+
+async function showResult(name, el) {
+  document.querySelectorAll('.ri').forEach(r => r.classList.remove('on'));
+  el.classList.add('on');
+  document.getElementById('res-placeholder').style.display = 'none';
+  document.getElementById('res-content').style.display = '';
+  setV('rd-title', name);
+
+  // Load CSV
+  try {
+    const r = await fetch(`${API}/results/csv?path=${encodeURIComponent(name+'/loss_curve.csv')}`);
+    if (r.ok) {
+      const rows = await r.json();
+      if (detailChart) { detailChart.destroy(); detailChart = null; }
+      const ctx = document.getElementById('detail-loss-chart');
+      if (ctx && rows.length) {
+        detailChart = new Chart(ctx, {
+          type:'line',
+          data:{
+            labels: rows.map(r => r.opt_step || r.step),
+            datasets:[{label:'Loss',data:rows.map(r=>parseFloat(r.loss||0)),
+              borderColor:'#7c6dfa',backgroundColor:'#7c6dfa18',
+              tension:0.3,pointRadius:0,borderWidth:1.5,fill:true}],
+          },
+          options:{animation:false,responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+            scales:{x:{ticks:{maxTicksLimit:6,font:{size:10}},grid:{color:'#21262d'}},y:{ticks:{font:{size:10}},grid:{color:'#21262d'}}}},
+        });
+      } else if (ctx && !rows.length) {
+        setV('rd-checkpoints','No loss_curve.csv data available.');
+      }
+    }
+  } catch (_) {}
+
+  // File badges + checkpoints
+  try {
+    const r2 = await fetch(`${API}/results`);
+    const all = await r2.json();
+    const item = all.find(x => x.name === name);
+    if (item) {
+      document.getElementById('rd-files').innerHTML =
+        item.files.map(f=>`<span class="fbadge">${f}</span>`).join('');
+      document.getElementById('rd-checkpoints').innerHTML = item.checkpoints.length
+        ? item.checkpoints.map(c=>`<div style="margin-bottom:5px">📦 ${c}</div>`).join('')
+        : 'No checkpoint files.';
+    }
+  } catch (_) {}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// History
+// ──────────────────────────────────────────────────────────────────────────────
+async function loadHistory() {
+  const tbody = document.getElementById('hist-tbody');
+  try {
+    const resp = await fetch(`${API}/runs`);
+    const runs = await resp.json();
+    if (!runs.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty">No runs yet.</td></tr>'; return; }
+    tbody.innerHTML = runs.map(r => {
+      const cfg = r.cfg || {};
+      const statusCls = r.status==='running'?'tl-ok':r.status==='stopped'?'tl-err':'';
+      const typeTag = {inca:'tag-i',baseline:'tag-b',ablation:'tag-a'}[cfg.model_type]||'tag-i';
+      return `<tr onclick="loadRunHistory('${r.run_id}')">
+        <td class="mono">${r.run_id.slice(0,18)}…</td>
+        <td>${cfg.dataset||'—'}</td>
+        <td><span class="tag ${typeTag}">${cfg.model_type||'inca'}</span></td>
+        <td class="mono">${cfg.selector||'—'}</td>
+        <td>${cfg.seed||'—'}</td>
+        <td class="${statusCls}">${r.status}</td>
+        <td>${r.vscode_launched?'✓ VS Code':'subprocess'}</td>
+        <td class="mono">${(r.started_at||'').slice(0,19).replace('T',' ')}</td>
+        <td><button class="btn btn-sm" onclick="event.stopPropagation();loadRunHistory('${r.run_id}')">View</button></td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Server offline.</td></tr>';
+  }
+}
+
+function loadRunHistory(runId) {
+  S.activeRunId = runId;
+  startLogStream(runId);
+  startMetricsPoll(runId);
+  setRunStatus('running', runId);
+  nav('monitor');
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Server health check
+// ──────────────────────────────────────────────────────────────────────────────
+async function checkServer() {
+  try {
+    const r = await fetch(`${API}/health`, {signal:AbortSignal.timeout(2500)});
+    if (!r.ok) throw new Error();
+    S.serverOk = true;
+    document.getElementById('srv-dot').className  = 'dot ok';
+    document.getElementById('srv-lbl').textContent = 'Server connected';
+    document.getElementById('offline-banner').style.display = 'none';
+    document.getElementById('run-btn').disabled = false;
+  } catch (_) {
+    S.serverOk = false;
+    document.getElementById('srv-dot').className  = 'dot';
+    document.getElementById('srv-lbl').textContent = 'Server offline';
+    document.getElementById('offline-banner').style.display = '';
+    document.getElementById('run-btn').disabled = true;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Boot
+// ──────────────────────────────────────────────────────────────────────────────
+function boot() {
+  renderDatasets();
+  renderModelTypes();
+  renderPeriods();
+  renderSelectors();
+  renderBaselines();
+  renderAblations();
+  renderBlockChain(1, null);
+  initCharts();
+  buildCmd();
+  checkServer();
+  setInterval(checkServer, 8000);
+}
+
+document.addEventListener('DOMContentLoaded', boot);
+</script>
+</body>
+</html>

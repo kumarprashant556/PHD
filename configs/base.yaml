@@ -1,0 +1,65 @@
+# Phase 0 — shared baseline config (v2: text-to-text edition).
+# Every baseline loads this (optionally overlaid with a method-specific YAML).
+#
+# Seq2seq models (Track A — primary, factual evaluation):
+#   google/flan-t5-small   —  80 M   fast smoke tests / CPU
+#   google/flan-t5-base    — 250 M   ← default; good balance for M4 MPS
+#   google/flan-t5-large   — 780 M   full-size (needs ~6 GB)
+#   google/flan-t5-xl      — 3.0 B   needs ≥12 GB
+#   t5-base                — 220 M   base T5 (no instruction tuning)
+#
+# Causal LM models (Track B — comparison baseline):
+#   EleutherAI/pythia-410m — 410 M   set model_type: causal
+#   distilgpt2             —  82 M   smoke tests, set model_type: causal
+#
+# Temporal streaming datasets:
+#   realtime_qa     — weekly news QA 2022–present  ← primary
+#   streaming_qa    — CC-News extractive QA 2007–2021
+#   temporal_wiki   — Wikipedia fact-change QA 2017–2022
+#   cc_news         — raw articles only (causal LM only, model_type: causal)
+#
+# MPS note: float32 is used automatically on MPS (float16 causes NaN on Metal).
+
+dataset: cc_news              # reads datasets/cc_news/processed/stream_v2/ automatically
+model_name: google/flan-t5-base
+model_type: seq2seq          # seq2seq | causal
+max_periods: 4               # 2017_H1 · 2017_H2 · 2018_H1 · 2018_H2 (2019 has <2 docs)
+max_train_probes: 2000        # cap training probes per period (0 = no cap; 2000 is good default)
+
+# training budget (tuned for flan-t5-base on MPS / ≤32 GB unified memory)
+# Memory budget breakdown for MPS:
+#   model weights  ~1 GB  (flan-t5-base fp32)
+#   gradients      ~1 GB
+#   AdamW states   ~2 GB  (2× params)
+#   activations    ~4 GB  (seq_len=128, batch=4, 12 enc+dec layers)
+#   MPS overhead   ~2 GB
+#   Total          ~10 GB  ← fits comfortably in 27 GB MPS budget
+epochs_per_period: 3
+batch_size: 4                # ↓ from 8; MPS OOM with batch=8 + seq=256 (T5 cross-attn is O(seq²))
+lr: 2.0e-5
+weight_decay: 0.0
+max_grad_norm: 1.0
+max_input_length: 128        # ↓ from 256; 4× less attention memory (quadratic in seq_len)
+max_target_length: 64        # ↓ from 256; decoder also attends over encoder output
+max_new_tokens: 32           # token generation cap during eval
+grad_accum_steps: 8          # effective batch = 4×8 = 32 (same as before)
+warmup_ratio: 0.06
+log_every_n_steps: 50
+gradient_checkpointing: true  # recompute activations on backward → ~40% less peak memory
+use_adafactor: false          # true = Adafactor (3-4× lower optimizer memory, try if still OOM)
+
+# eval
+ppl_eval_samples: 300
+ppl_eval_frac: 0.20
+probe_max: 200
+eval_mode: combined          # em | f1 | combined
+em_weight: 0.4               # seq2seq combined = em_weight*EM + f1_weight*F1
+f1_weight: 0.6
+ppl_weight: 0.4              # causal combined = ppl_weight*ppl_score + probe_weight*probe_acc
+probe_weight: 0.6
+ppl_decay: 0.3
+
+# housekeeping
+seed: 42
+device: ""                   # auto-select
+notes: "phase0-v2-seq2seq"

@@ -1,0 +1,119 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CAPSEL: Start Training UI",
+      "type": "shell",
+      "command": "python app_server.py",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "CAPSEL Training UI",
+          "endsPattern": "http://localhost:7860"
+        }
+      }
+    },
+    {
+      "label": "CAPSEL: Train INCA (cc_news, embedding_query)",
+      "type": "shell",
+      "command": "python scripts/train_inca.py --config configs/inca.yaml --dataset cc_news --selector embedding_query --seed 42",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CAPSEL: Train Baseline Sequential",
+      "type": "shell",
+      "command": "python scripts/train_baseline.py --config configs/inca.yaml --mode sequential --dataset cc_news --seed 42",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CAPSEL: Train Baseline Joint",
+      "type": "shell",
+      "command": "python scripts/train_baseline.py --config configs/inca.yaml --mode joint --dataset cc_news --seed 42",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CAPSEL: Install Dependencies",
+      "type": "shell",
+      "command": "pip install -r requirements.txt",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "CAPSEL: cc_news baseline embedding_query s42",
+      "type": "shell",
+      "command": "python scripts/train_baseline.py --config configs/inca.yaml --mode sequential --dataset cc_news --seed 42 2>&1 | tee \"/Users/nishantkumar/Desktop/phd/code/My project/WorkingDir/results/run_20260602_142114_c9a915.log\"",
+      "options": {
+        "cwd": "/Users/nishantkumar/Desktop/phd/code/My project/WorkingDir"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "new"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

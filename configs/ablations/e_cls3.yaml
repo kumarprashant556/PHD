@@ -1,0 +1,11 @@
+# E-CLS3: replay strategy ablation
+defaults:
+  - /configs/inca
+
+# uniform  = Phase A only (p_hard=0, p_easy=0, p_mid=1)
+# hardest  = p_hard=1.0, p_easy=0, p_mid=0
+# easiest  = p_hard=0, p_easy=1.0, p_mid=0
+# schedule = default (p_hard=0.70, p_easy=0.20, p_mid=0.10)
+sweep:
+  replay_strategy: [uniform, hardest, easiest, schedule]
+  seed: [42, 123, 999]

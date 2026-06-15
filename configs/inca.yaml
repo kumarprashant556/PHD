@@ -1,0 +1,72 @@
+# CAPSEL — INCA training config
+# All keys map 1-to-1 to INCAConfig field names.
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model_name:  "google/flan-t5-base"
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+dataset:       "cc_news"
+n_per_period:  20000       # max items loaded per temporal period
+max_periods:   4           # 4 usable periods: 2017_H1/H2, 2018_H1/H2 (2019 has <2 articles)
+split_frac:    0.50        # completion framing: encoder gets first half of document
+
+# ── Training ──────────────────────────────────────────────────────────────────
+lr:                  3.0e-4
+weight_decay:        0.01
+batch_size:          8          # MPS-safe; effective batch = 8 × grad_accum_steps
+epochs_per_period:   5          # training epochs per CL period
+warmup_steps:           200
+warmup_ratio:           0.06    # used only when warmup_steps is 0
+grad_accum_steps:       4       # effective batch = 8 × 4 = 32 (same as original)
+max_grad_norm:          1.0
+gradient_checkpointing: true    # saves ~40% VRAM on MPS, ~20% slower
+use_adafactor:          false   # set true for additional optimizer memory savings
+ppl_eval_frac:          0.05   # fraction of period used for perplexity evaluation
+seed:                   42
+fp16:                   false
+log_every_n_steps:      50
+max_input_length:    256
+max_target_length:   256
+
+# ── INCA block-chain growth ───────────────────────────────────────────────────
+n_max_blocks:           8
+k_eval:                 50    # eval saturation signals every k_eval opt steps
+patience:               5     # consecutive plateau evals before firing
+min_epochs_before_grow: 2     # grokking guard
+layers_per_block:       4     # flan-t5-base has 12 layers → max 3 blocks before OOM
+lateral_rank:           0     # 0 = Phase 1 (no lateral adapters)
+
+# ── Multi-signal consensus ────────────────────────────────────────────────────
+rir_threshold:        0.30
+rir_negligible:       0.05
+grad_norm_ema_alpha:  0.10
+grad_norm_decay_frac: 0.50
+
+# ── CKA ───────────────────────────────────────────────────────────────────────
+cka_ref_size:             200
+cka_saturation_threshold: 0.95
+
+# ── Replay ────────────────────────────────────────────────────────────────────
+buffer_max_size: 2000
+replay_ratio:    0.25
+n_revise:        3
+p_hard:          0.70
+p_easy:          0.20
+p_mid:           0.10
+
+# ── Drift & relabelling ───────────────────────────────────────────────────────
+period_drift_tol:    0.10
+min_rir_for_learned: 0.20
+
+# ── Selector ──────────────────────────────────────────────────────────────────
+selector:        "embedding_query"   # embedding_query | uclbr | cross_attention | weighted_sum
+selector_heads:  4
+selector_hidden: 64
+
+uclbr_pre_gate_hidden: 64
+uclbr_heads:           4
+uclbr_bias_lr:         1.0e-3
+uclbr_top_k:           0
+
+# ── Output ────────────────────────────────────────────────────────────────────
+out_dir: "results"

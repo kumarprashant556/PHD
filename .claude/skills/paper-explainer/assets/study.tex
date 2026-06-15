@@ -1,0 +1,148 @@
+% study.tex — pandoc template for paper-explainer outputs.
+%
+% Renders a single-document study PDF: title block, TOC, numbered sections,
+% math via amsmath/amssymb/mathtools, code listings with a custom 'pseudo'
+% language for algorithm boxes, hyperlinked TOC and refs. Designed for xelatex.
+%
+% No external CTAN dependencies beyond what ships with texlive-{base,
+% recommended,extra,xetex} on Ubuntu 22.
+\documentclass[$if(fontsize)$$fontsize$$else$11pt$endif$,a4paper]{article}
+
+% Geometry & spacing
+\usepackage[$if(geometry)$$geometry$$else$margin=1in$endif$]{geometry}
+\usepackage{setspace}
+\setstretch{1.15}
+\usepackage{microtype}
+\usepackage{parskip}
+
+% Math
+\usepackage{amsmath, amssymb, amsthm, mathtools, bm}
+\numberwithin{equation}{section}
+
+% Fonts (xelatex)
+\usepackage{fontspec}
+$if(mainfont)$
+\setmainfont{$mainfont$}
+$else$
+\setmainfont{Latin Modern Roman}
+$endif$
+$if(monofont)$
+\setmonofont{$monofont$}
+$else$
+\setmonofont{Latin Modern Mono}
+$endif$
+\usepackage{unicode-math}
+$if(mathfont)$
+\setmathfont{$mathfont$}
+$else$
+\setmathfont{Latin Modern Math}
+$endif$
+
+% Colour
+\usepackage[svgnames]{xcolor}
+
+% Code listings — also defines a 'pseudo' language for algorithm boxes.
+\usepackage{listings}
+\lstdefinelanguage{pseudo}{
+  morekeywords={if, else, then, end, for, while, do, return, sample, update,
+                input, output, require, ensure, function, procedure, repeat,
+                until, break, continue, in, foreach},
+  sensitive=false,
+  morecomment=[l]{//},
+  morecomment=[l]{\#},
+  morestring=[b]",
+}
+\lstdefinestyle{pyStyle}{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{NavyBlue}\bfseries,
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{teal},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{gray!40},
+  framesep=4pt,
+  xleftmargin=8pt,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+}
+\lstdefinestyle{pseudoStyle}{
+  language=pseudo,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{NavyBlue}\bfseries,
+  commentstyle=\color{gray}\itshape,
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{gray!40},
+  framesep=4pt,
+  xleftmargin=8pt,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+}
+\lstset{style=pyStyle}
+
+% Tables
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+
+% Hyperlinks (load late)
+\usepackage[
+  colorlinks=true,
+  linkcolor=$if(linkcolor)$$linkcolor$$else$NavyBlue$endif$,
+  urlcolor=$if(urlcolor)$$urlcolor$$else$NavyBlue$endif$,
+  citecolor=$if(linkcolor)$$linkcolor$$else$NavyBlue$endif$,
+  pdfborder={0 0 0}
+]{hyperref}
+
+% Section styling
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.5em}{}
+
+% Pandoc emits \tightlist for compressed lists; declare it as a no-op so the
+% template doesn't fail when pandoc uses it.
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
+% Pandoc Shaded environment (for syntax-highlighted code blocks). We don't
+% load fancyvrb/framed, so degrade Shaded to verbatim if it's emitted.
+\providecommand{\Shaded}{\verbatim}
+\providecommand{\endShaded}{\endverbatim}
+
+% Title block
+$if(title)$
+\title{$title$}
+$endif$
+$if(author)$
+\author{$author$}
+$endif$
+$if(date)$
+\date{$date$}
+$else$
+\date{}
+$endif$
+
+\begin{document}
+
+$if(title)$
+\maketitle
+$endif$
+
+$if(toc)$
+{
+  \hypersetup{linkcolor=black}
+  \setcounter{tocdepth}{$toc-depth$}
+  \tableofcontents
+  \vspace{1em}
+  \hrule
+  \vspace{1em}
+}
+$endif$
+
+$body$
+
+\end{document}

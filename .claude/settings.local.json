@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pandoc --track-changes=all \"/Users/nishantkumar/Desktop/phd/code/My project/WorkingDir/CAPSEL_research_memorandum_FINAL.docx\" -o /tmp/capsel_memo.md)",
+      "Read(//tmp/**)",
+      "Bash(pip3 install *)",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}

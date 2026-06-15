@@ -1,0 +1,12 @@
+# E-ROUTE: routing selector ablation
+# Runs 4 selectors x 3 seeds = 12 total runs
+defaults:
+  - /configs/inca
+
+sweep:
+  selector: [embedding_query, uclbr, cross_attention, weighted_sum]
+  seed:     [42, 123, 999]
+
+dataset:       cc_news
+n_periods:     6
+items_per_period: 20000

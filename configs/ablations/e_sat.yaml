@@ -1,0 +1,9 @@
+# E-SAT: saturation detector comparison
+# threshold-INCA vs RIR-only vs multi-signal vs SPRT
+defaults:
+  - /configs/inca
+
+sweep:
+  rir_threshold: [0.20, 0.30, 0.40]
+  patience:      [3, 5, 8]
+  seed:          [42, 123, 999]

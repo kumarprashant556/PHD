@@ -1,0 +1,85 @@
+# INCA-v2 smoke-test config  (Phase 1)
+# ──────────────────────────────────────────────────────────────────────────────
+# Designed for a quick end-to-end sanity check on an M4 Mac (24 GB MPS) or CPU.
+# Keeps probe counts and block caps tiny so a full run finishes in minutes.
+#
+# For a real training run:
+#   - Raise max_train_probes to 0 (no cap) or ≥ 5000
+#   - Raise n_max_blocks to 6–8
+#   - Raise epochs_per_period to 5–10
+#   - Switch dataset to medmcqa for the benchmark from the paper
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Base model (inherited from Phase0Config) ──────────────────────────────────
+dataset: cc_news
+model_name: google/flan-t5-small   # ~80M — fastest for smoke testing
+model_type: seq2seq
+max_periods: 3
+max_train_probes: 200              # tiny cap for smoke test (200 probes/period)
+max_seq_len: 256
+max_answer_len: 32
+max_new_tokens: 32
+
+# ── Training budget ───────────────────────────────────────────────────────────
+epochs_per_period: 2
+batch_size: 4
+lr: 3.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+grad_accum_steps: 2                # effective batch = 4 × 2 = 8
+warmup_ratio: 0.06
+log_every_n_steps: 10
+gradient_checkpointing: false
+use_adafactor: false
+
+# ── Eval ──────────────────────────────────────────────────────────────────────
+ppl_eval_samples: 100
+ppl_eval_frac: 0.20
+probe_max: 100
+eval_mode: combined
+em_weight: 0.4
+f1_weight: 0.6
+ppl_weight: 0.4
+probe_weight: 0.6
+ppl_decay: 0.3
+
+# ── INCA block-chain growth ───────────────────────────────────────────────────
+n_max_blocks: 3                    # max blocks before RuntimeError (smoke: 3)
+k_eval: 20                         # check saturation every 20 opt steps
+patience: 3                        # plateau window size (loss tracker)
+min_epochs_before_grow: 1          # grokking guard (smoke: 1; production: 2+)
+layers_per_block: 4                # flan-t5-small has 8 layers → 2 blocks max
+lateral_rank: 0                    # 0 = no lateral adapters (Phase 2)
+
+# ── [T1.1] Multi-signal consensus ─────────────────────────────────────────────
+rir_threshold: 0.30                # RIR ≥ this → PERIOD_LEARNED (+ plateau)
+rir_negligible: 0.05               # RIR ≤ this → block-full candidate
+grad_norm_ema_alpha: 0.10
+grad_norm_decay_frac: 0.50
+
+# ── [T1.5] CKA reference set ─────────────────────────────────────────────────
+cka_ref_size: 50                   # smoke: small; production: 200
+cka_saturation_threshold: 0.95
+
+# ── [T1.4] Study-schedule replay ─────────────────────────────────────────────
+buffer_max_size: 200
+replay_ratio: 0.25
+n_revise: 2                        # epochs in uniform-sampling regime
+p_hard: 0.70
+p_easy: 0.20
+p_mid: 0.10
+
+# ── [T1.3] Period drift safety ────────────────────────────────────────────────
+period_drift_tol: 0.10             # trigger early grow if replay acc drops > 10%
+
+# ── [T1.2] Early-stopping relabelling ────────────────────────────────────────
+min_rir_for_learned: 0.20          # timeout → PERIOD_LEARNED only if RIR ≥ this
+
+# ── Selector ─────────────────────────────────────────────────────────────────
+selector_hidden: 64                # gate MLP hidden dim in CrossAttentionSelector
+
+# ── Housekeeping ─────────────────────────────────────────────────────────────
+seed: 42
+device: ""                         # auto-detect (mps → cuda → cpu)
+out_dir: Phase1/results
+notes: "inca-v2-smoke-test"

@@ -1,0 +1,19 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name            = "capsel"
+version         = "0.1.0"
+description     = "CAPSEL/INCA — Continually-growing transformer with saturation-driven expansion"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"

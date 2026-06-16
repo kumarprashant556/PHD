@@ -26,9 +26,19 @@ temporal data system design in docs/dataset_strategy_FINAL.md:
       input : "period: 2018_H1\\ndenoise: <corrupted sentence>"
       target: "<extra_id_0> span0 <extra_id_1> span1 <extra_id_2>"
 
-Both tasks go in the same JSONL file.  Filter by task= at training time for
-the E-FORMAT ablation (F-COMP = completion only, F-DENOISE = ssd only,
-F-MIX = 70 % completion + 30 % salient-span denoising).
+  task="entity_cloze"   (mirrors the entity_cloze probe format exactly)
+      input : "period: 2018_H1\\nfill: ...<mask>..."
+      target: "<entity>"
+
+  task="date_cloze"     (mirrors the date_cloze probe format exactly)
+      input : "period: 2018_H1\\nfill: ...<mask>..."
+      target: "<YYYY>"
+
+All four tasks go in the same JSONL file.  Filter by task= at training time
+for the E-FORMAT ablation (F-COMP = completion only, F-DENOISE = ssd only,
+F-MIX = mix of all four; recommended default).  Keeping the cloze tasks in
+the stream means the BWT/FWT exact-match eval is measuring something the
+model was actually trained to do.
 
 ============================================================
 PROBES — frozen evaluation items
@@ -65,8 +75,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CC_NEWS_RAW = REPO_ROOT / "datasets" / "cc_news" / "raw" / "raw.jsonl"
-DEFAULT_TIC_LM_RAW_DIR = REPO_ROOT / "datasets" / "tic_lm" / "raw"
+DEFAULT_CC_NEWS_RAW = REPO_ROOT / "local_data" / "cc_news" / "raw" / "raw.jsonl"
+DEFAULT_TIC_LM_RAW_DIR = REPO_ROOT / "local_data" / "tic_lm" / "raw"
 
 STREAM_DIRNAME = "stream_v2"
 PROBES_DIRNAME = "probes_v2"
@@ -131,7 +141,7 @@ class PeriodBucket:
 
 def process_cc_news_raw(
     raw_path: Path = DEFAULT_CC_NEWS_RAW,
-    output_root: Path = REPO_ROOT / "datasets" / "cc_news" / "processed",
+    output_root: Path = REPO_ROOT / "local_data" / "cc_news" / "processed",
     period_granularity: str = "half_year",
     max_docs_per_period: int = 0,
     probes_per_period: int = 300,
@@ -164,7 +174,7 @@ def process_cc_news_raw(
 
 def process_tic_lm_raw(
     raw_dir: Path = DEFAULT_TIC_LM_RAW_DIR,
-    output_root: Path = REPO_ROOT / "datasets" / "tic_lm" / "processed",
+    output_root: Path = REPO_ROOT / "local_data" / "tic_lm" / "processed",
     period_granularity: str = "day",
     max_docs_per_period: int = 0,
     probes_per_period: int = 300,
@@ -310,13 +320,19 @@ def _process_rows(cfg: ProcessingConfig, rows: Iterable[Dict[str, Any]]) -> Dict
         "counts": counts,
         "formats": {
             "stream": {
-                "tasks": ["completion", "salient_span_denoising"],
+                "tasks": [
+                    "completion",
+                    "salient_span_denoising",
+                    "entity_cloze",
+                    "date_cloze",
+                ],
                 "fields": ["task", "doc_id", "period", "source", "date", "input", "target"],
                 "note": (
                     "Each line is a ready-to-use training example. "
-                    "Filter by task= for E-FORMAT ablation: "
-                    "F-COMP (completion only), F-DENOISE (ssd only), "
-                    "F-MIX (70% completion + 30% salient_span_denoising)."
+                    "entity_cloze and date_cloze mirror the probe format exactly "
+                    "(period: X\\nfill: ...<mask>...) so the model trains on the "
+                    "same task its BWT/FWT eval scores it on. "
+                    "Filter by task= for E-FORMAT ablation."
                 ),
             },
             "probes": {
@@ -538,13 +554,17 @@ def _build_training_examples(
 ) -> List[Dict[str, Any]]:
     """Return formatted training examples for the stream file.
 
-    Each document produces:
-      - 1 completion example  (task="completion")          — always, if doc >= 120 words
-      - 1 salient-span denoising example (task="salient_span_denoising") — if a valid
-        sentence with 2+ salient spans exists
+    Each document produces up to FOUR examples (all interleaved in the same
+    JSONL so the trainer can filter by task= for the E-FORMAT ablation):
 
-    Both tasks are interleaved in the same JSONL so the trainer can filter by
-    task= for the E-FORMAT ablation without re-processing.
+      - 1 completion           (task="completion")          if doc >= 120 words
+      - 1 salient-span denoise  (task="salient_span_denoising")  if 2+ salient spans
+      - 1 entity cloze          (task="entity_cloze")        if a named entity is found
+      - 1 date cloze            (task="date_cloze")          if a 4-digit year is found
+
+    Entity / date cloze items use the SAME format as the cloze probes
+    (``period: X\\nfill: ...<mask>...``) so the model sees this format during
+    training and the eval-time BWT/FWT exact-match scoring is meaningful.
     """
     examples: List[Dict[str, Any]] = []
     for doc in docs:
@@ -554,6 +574,12 @@ def _build_training_examples(
         ssd = _make_ssd_training_ex(doc, rng)
         if ssd:
             examples.append(ssd)
+        ent = _make_entity_cloze_training_ex(doc)
+        if ent:
+            examples.append(ent)
+        dat = _make_date_cloze_training_ex(doc)
+        if dat:
+            examples.append(dat)
     return examples
 
 
@@ -623,6 +649,83 @@ def _make_ssd_training_ex(
             "task": "salient_span_denoising",
             "input": "period: " + doc["period"] + "\ndenoise: " + corrupted,
             "target": " ".join(target_parts),
+            "evidence": sentence,
+        }
+        if "title" in doc:
+            ex["title"] = doc["title"]
+        if "url" in doc:
+            ex["url"] = doc["url"]
+        return ex
+    return None
+
+
+def _make_entity_cloze_training_ex(
+    doc: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Entity-cloze training example — mirrors the entity_cloze probe format.
+
+    Picks a sentence containing at least one capitalised named entity, masks
+    the last such entity with ``<mask>``, and emits:
+
+        input : "period: <period>\\nfill: <sentence with one <mask>>"
+        target: "<entity>"
+    """
+    for sentence in _sentences(doc["text"]):
+        entities = [
+            ent.strip()
+            for ent in _ENTITY_RE.findall(sentence)
+            if (
+                len(ent.strip()) >= 3
+                and ent.strip().lower() not in _ENTITY_STOPWORDS
+            )
+        ]
+        entities = _unique_preserve_order(entities)
+        if not entities:
+            continue
+        answer = entities[-1]
+        masked = re.sub(rf"\b{re.escape(answer)}\b", "<mask>", sentence, count=1)
+        if "<mask>" not in masked:
+            continue
+        ex: Dict[str, Any] = {
+            "doc_id": doc["doc_id"] + "_ent_cloze",
+            "period": doc["period"],
+            "source": doc["source"],
+            "date": doc.get("date", ""),
+            "task": "entity_cloze",
+            "input": f"period: {doc['period']}\nfill: {masked}",
+            "target": answer,
+            "evidence": sentence,
+        }
+        if "title" in doc:
+            ex["title"] = doc["title"]
+        if "url" in doc:
+            ex["url"] = doc["url"]
+        return ex
+    return None
+
+
+def _make_date_cloze_training_ex(
+    doc: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Date-cloze training example — mirrors the date_cloze probe format.
+
+        input : "period: <period>\\nfill: <sentence with year masked>"
+        target: "<4-digit year>"
+    """
+    for sentence in _sentences(doc["text"]):
+        dates = re.findall(r"\b(?:19|20)\d{2}\b", sentence)
+        if not dates:
+            continue
+        answer = dates[-1]
+        masked = re.sub(rf"\b{re.escape(answer)}\b", "<mask>", sentence, count=1)
+        ex: Dict[str, Any] = {
+            "doc_id": doc["doc_id"] + "_date_cloze",
+            "period": doc["period"],
+            "source": doc["source"],
+            "date": doc.get("date", ""),
+            "task": "date_cloze",
+            "input": f"period: {doc['period']}\nfill: {masked}",
+            "target": answer,
             "evidence": sentence,
         }
         if "title" in doc:

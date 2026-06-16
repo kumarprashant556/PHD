@@ -48,6 +48,7 @@ from models.inca.replay  import INCAReplayBuffer
 
 import data as data_module   # data/__init__.py  (load_periods, tokenize, …)
 from data.tokenizer import build_tokenized_periods, make_dataloader, make_replay_dataloader
+from training.memory_tracker import MemoryTracker
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -209,12 +210,16 @@ def _cache_cka_reference(
     max_seq_len: int = 256,
     n_samples: int = 200,
 ) -> None:
-    """Adapt raw Dataset rows for CKAMonitor (which expects dicts with 'question')."""
+    """Cache CKA reference set from raw Dataset rows.
+
+    CKAMonitor._items_to_texts now reads ``input_text`` / ``text`` / ``question``
+    natively, so we can hand it raw rows without wrapping.
+    """
     indices = list(range(len(raw_ds)))
     if len(indices) > n_samples:
         indices = random.sample(indices, n_samples)
     subset = raw_ds.select(indices)
-    items = [{"question": row["input_text"]} for row in subset]
+    items = [dict(row) for row in subset]
     monitor.cache_reference(manager, items, tokenizer, device, max_seq_len=max_seq_len)
 
 
@@ -253,6 +258,63 @@ def _tokenize_replay_items(
             "labels":         labels[i],
         })
     return result
+
+
+@torch.no_grad()
+def _per_item_losses(
+    model: T5ForConditionalGeneration,
+    manager: INCALayerManager,
+    items: List[dict],
+    tokenizer,
+    device: str,
+    max_input_length: int,
+    max_target_length: int,
+    batch_size: int,
+) -> List[float]:
+    """Compute per-item cross-entropy loss (no reduction) for replay scoring.
+
+    Returns one scalar per item, in the same order as ``items``.  Used to
+    refresh INCAReplayBuffer entries so Phase B's hard/easy/mid study
+    schedule has real loss values to sort on.
+    """
+    if not items:
+        return []
+    model.eval()
+    manager.eval()
+    pad_id = tokenizer.pad_token_id
+    losses: List[float] = []
+    ce_none = nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
+    for start in range(0, len(items), batch_size):
+        chunk = items[start: start + batch_size]
+        enc = tokenizer(
+            [it["input_text"] for it in chunk],
+            truncation=True, max_length=max_input_length,
+            padding=True, return_tensors="pt",
+        ).to(device)
+        dec = tokenizer(
+            text_target=[it["target_text"] for it in chunk],
+            truncation=True, max_length=max_target_length,
+            padding=True, return_tensors="pt",
+        )
+        labels = dec["input_ids"].to(device)
+        labels_masked = labels.clone()
+        labels_masked[labels_masked == pad_id] = -100
+
+        enc_hidden = manager(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"])
+        enc_out = BaseModelOutput(last_hidden_state=enc_hidden)
+        out = model(
+            encoder_outputs=enc_out,
+            attention_mask=enc["attention_mask"],
+            labels=labels_masked,
+        )
+        logits = out.logits           # (B, T, V)
+        B, T, V = logits.shape
+        flat_loss = ce_none(logits.reshape(B * T, V), labels_masked.reshape(B * T))
+        flat_loss = flat_loss.view(B, T)
+        valid = (labels_masked != -100).float()
+        per_item = (flat_loss * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+        losses.extend(per_item.detach().cpu().tolist())
+    return losses
 
 
 def _check_replay_drift(
@@ -315,20 +377,38 @@ def _grow_block(
 # Main training function
 # ──────────────────────────────────────────────────────────────────────────────
 
-def train(cfg: INCAConfig, device: str) -> None:
+def train(cfg: INCAConfig, device: str,
+          resume_dir: Optional[str] = None) -> str:
     """Full INCA-v2 training loop.
 
     Parameters
     ----------
-    cfg    : validated INCAConfig dataclass
-    device : "cuda" | "mps" | "cpu"
+    cfg        : validated INCAConfig dataclass
+    device     : "cuda" | "mps" | "cpu"
+    resume_dir : if set, reuse this exact directory and resume from the latest
+                 period checkpoint found inside it.  Periods already checkpointed
+                 are skipped; the model/manager state is restored from the last
+                 completed period before the new period loop begins.
+
+    Returns
+    -------
+    str — absolute path to the run output directory (for the orchestrator registry)
     """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(cfg.out_dir) / f"inca_v2_{timestamp}"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if resume_dir:
+        out_dir = Path(resume_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path(cfg.out_dir) / f"inca_v2_{timestamp}"
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     logger   = _RunLogger(out_dir, dataclasses.asdict(cfg))
     loss_log = _LossLog(out_dir / "loss_curve.csv")
+
+    # Write an identity marker so the orchestrator can discover this out_dir
+    # even if the trainer is launched outside of run_paper_b.py.
+    with open(out_dir / "run_id.json", "w") as _f:
+        json.dump({"out_dir": str(out_dir), "started_at": datetime.now().isoformat()}, _f)
 
     # ── reproducibility ────────────────────────────────────────────────
     seed = getattr(cfg, "seed", 42)
@@ -356,6 +436,31 @@ def train(cfg: INCAConfig, device: str) -> None:
 
     logger.log(f"Periods ({len(period_ids)}): {period_ids}")
 
+    # ── Phase 1 resume: scan for completed period checkpoints ─────────────
+    # Done here (after period_ids are known, before the model is built) so
+    # we can log what will be skipped before expensive model loading starts.
+    _resume_periods_done: set = set()
+    _resume_ckpt_path: Optional[Path] = None
+    if resume_dir:
+        _ckpt_files = sorted(
+            out_dir.glob("inca_period_*.pt"),
+            key=lambda p: period_ids.index(p.stem.replace("inca_period_", ""))
+            if p.stem.replace("inca_period_", "") in period_ids else -1,
+        )
+        for cf in _ckpt_files:
+            pid = cf.stem.replace("inca_period_", "")
+            if pid in period_ids:
+                _resume_periods_done.add(pid)
+                _resume_ckpt_path = cf
+        if _resume_periods_done:
+            logger.log(
+                f"[Resume] Found {len(_resume_periods_done)} completed period(s): "
+                f"{sorted(_resume_periods_done, key=period_ids.index)}  "
+                f"— will load weights from {_resume_ckpt_path.name}"
+            )
+        else:
+            logger.log("[Resume] No period checkpoints found — starting from scratch.")
+
     # ── tokenizer + base model ─────────────────────────────────────────
     logger.log(f"Loading model: {cfg.model_name}")
     tokenizer  = AutoTokenizer.from_pretrained(cfg.model_name)
@@ -378,6 +483,22 @@ def train(cfg: INCAConfig, device: str) -> None:
 
     # ── INCA manager ───────────────────────────────────────────────────
     manager = INCALayerManager(base_model, cfg).to(device)
+
+    # ── Phase 2 resume: restore model/manager from latest checkpoint ───
+    if _resume_ckpt_path is not None:
+        logger.log(f"[Resume] Loading checkpoint: {_resume_ckpt_path}")
+        _ckpt = torch.load(_resume_ckpt_path, map_location=device)
+        base_model.load_state_dict(_ckpt["base_model_state"])
+        manager.load_manager_state(_ckpt["manager_state"])
+        block_idx      = _ckpt.get("block_idx", 0)
+        global_opt_step_offset = _ckpt.get("global_opt_step", 0)
+        logger.log(
+            f"[Resume] Restored block_idx={block_idx}  "
+            f"global_opt_step={global_opt_step_offset}"
+        )
+    else:
+        block_idx = 0
+        global_opt_step_offset = 0
 
     # ── LR schedule parameters (estimated over all periods) ───────────
     accum           = max(1, getattr(cfg, "grad_accum_steps", 1))
@@ -414,14 +535,22 @@ def train(cfg: INCAConfig, device: str) -> None:
     detector    = INCAPlateauDetector(cfg)
     cka_monitor = CKAMonitor(ref_size=cfg.cka_ref_size)
 
-    global_opt_step = 0
-    block_idx       = 0
+    global_opt_step = global_opt_step_offset   # 0 on fresh start; restored on resume
+    # block_idx already set above (0 or restored from checkpoint)
     prev_replay_acc: float = 1.0
+
+    # ── memory / efficiency tracker ────────────────────────────────────────
+    mem_tracker = MemoryTracker(device=device, method="inca")
 
     # ══════════════════════════════════════════════════════════════════
     # Period loop
     # ══════════════════════════════════════════════════════════════════
     for period_idx, period_id in enumerate(period_ids):
+        # ── resume: skip already-completed periods ─────────────────────────
+        if period_id in _resume_periods_done:
+            logger.log(f"[Resume] Skipping {period_id} (checkpoint found).")
+            continue
+
         raw_ds = raw_periods[period_id]
         tok_ds = tok_periods[period_id]
         tok_ds.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
@@ -443,6 +572,9 @@ def train(cfg: INCAConfig, device: str) -> None:
             f"(train={len(train_tok)}, eval={len(eval_raw)})\n"
             f"Block chain: {manager.n_blocks} block(s)"
         )
+        # ── memory tracker: period start ───────────────────────────────────
+        pre_period_score: float = 0.0
+        mem_tracker.period_start(period_id, base_model)
 
         # ── CKA reference at period start ──────────────────────────────
         _cache_cka_reference(
@@ -456,8 +588,12 @@ def train(cfg: INCAConfig, device: str) -> None:
         replay_acc_before: float = prev_replay_acc
 
         # ── build DataLoader (replay-mixed if buffer non-empty) ────────
+        # Sampling uses the current period index as the "epoch" proxy: items
+        # added in earlier periods will already have refreshed loss values
+        # from previous update_losses() calls, so Phase B's hard/easy/mid
+        # schedule has real signal to act on.
         replay_n = getattr(cfg, "replay_n_per_period", 2_000)
-        raw_replay = replay_buf.sample(n=replay_n, epoch=0) if had_replay_before else []
+        raw_replay = replay_buf.sample(n=replay_n, epoch=period_idx) if had_replay_before else []
         replay_items = _tokenize_replay_items(
             raw_replay, tokenizer,
             max_input_length=cfg.max_input_length,
@@ -556,6 +692,8 @@ def train(cfg: INCAConfig, device: str) -> None:
                             )
                             detector.reset_block()
                             cka_monitor.reset()
+                            # Per-block replay buffer: clear at freeze (spec T1.4).
+                            replay_buf.clear_all()
                             block_idx += 1
                             period_done = True   # restart period after grow
                             break
@@ -580,6 +718,7 @@ def train(cfg: INCAConfig, device: str) -> None:
                                     )
                                     detector.reset_block()
                                     cka_monitor.reset()
+                                    replay_buf.clear_all()
                                     block_idx += 1
                                     period_done = True
                                     break
@@ -611,6 +750,7 @@ def train(cfg: INCAConfig, device: str) -> None:
                     )
                     detector.reset_block()
                     cka_monitor.reset()
+                    replay_buf.clear_all()
                     block_idx += 1
                 except RuntimeError as exc:
                     logger.log(f"  [T1.3] grow skipped: {exc}")
@@ -623,6 +763,24 @@ def train(cfg: INCAConfig, device: str) -> None:
         )
         logger.log(f"  Post-period accuracy: {post_score:.4f}")
         prev_replay_acc = post_score
+        # ── memory tracker: period end ─────────────────────────────────────
+        mem_tracker.period_end(
+            period_id, base_model, acc_delta=post_score - pre_period_score
+        )
+        logger.log(mem_tracker.summary())
+
+        # ── refresh replay-buffer losses for Phase B study schedule ───
+        # Without this the buffer's loss values stay 0.0 → Phase B
+        # hard/easy/mid sampling degenerates to uniform.
+        if period_id in replay_buf.periods:
+            stored_items = [e.item for e in replay_buf._store[period_id]]
+            per_item_losses = _per_item_losses(
+                base_model, manager, stored_items, tokenizer, device,
+                cfg.max_input_length,
+                getattr(cfg, "max_target_length", cfg.max_input_length),
+                cfg.batch_size,
+            )
+            replay_buf.update_losses(period_id, stored_items, per_item_losses)
 
         # ── period checkpoint ──────────────────────────────────────────
         ckpt_path = out_dir / f"inca_period_{period_id}.pt"
@@ -649,20 +807,37 @@ def train(cfg: INCAConfig, device: str) -> None:
         "cfg":              dataclasses.asdict(cfg),
     }, final_ckpt)
     logger.log(f"\nTraining complete.  Final checkpoint → {final_ckpt}")
+    mem_tracker.save(out_dir / "memory_log.json")
+    return str(out_dir)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI (called via scripts/train_inca.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
+_EXPAND_AT_OVERRIDES: dict[str, dict] = {
+    "early":      {"rir_threshold": 99.0, "rir_negligible": 99.0,
+                   "patience": 1, "min_epochs_before_grow": 1},
+    "saturation": {},
+    "late":       {"rir_threshold": 99.0, "patience": 999,
+                   "min_epochs_before_grow": 99},
+    "never":      {"n_max_blocks": 1},
+}
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train INCA-v2")
-    p.add_argument("--config",   required=True, help="Path to YAML config")
-    p.add_argument("--dataset",  default=None,  help="Override cfg.dataset")
-    p.add_argument("--selector", default=None,  help="Override cfg.selector")
-    p.add_argument("--seed",     type=int, default=None, help="Override cfg.seed")
-    p.add_argument("--device",   default=None,  help="cpu | mps | cuda")
-    p.add_argument("--dry-run",  action="store_true",
+    p.add_argument("--config",    required=True, help="Path to YAML config")
+    p.add_argument("--dataset",   default=None,  help="Override cfg.dataset")
+    p.add_argument("--selector",  default=None,  help="Override cfg.selector")
+    p.add_argument("--seed",      type=int, default=None, help="Override cfg.seed")
+    p.add_argument("--device",    default=None,  help="cpu | mps | cuda")
+    p.add_argument("--expand_at", default=None,
+                   choices=list(_EXPAND_AT_OVERRIDES),
+                   help="E-TIMING ablation mode: early | saturation | late | never")
+    p.add_argument("--resume_dir", default=None,
+                   help="Resume from this run directory (reuses out_dir, skips done periods)")
+    p.add_argument("--dry-run",   action="store_true",
                    help="Validate config + build model — don't train")
     return p.parse_args()
 
@@ -674,9 +849,10 @@ def main() -> None:
     with open(args.config) as f:
         cfg_dict = yaml.safe_load(f) or {}
 
-    if args.dataset:  cfg_dict["dataset"]  = args.dataset
-    if args.selector: cfg_dict["selector"] = args.selector
-    if args.seed:     cfg_dict["seed"]     = args.seed
+    if args.dataset:   cfg_dict["dataset"]   = args.dataset
+    if args.selector:  cfg_dict["selector"]  = args.selector
+    if args.seed:      cfg_dict["seed"]      = args.seed
+    if args.expand_at: cfg_dict.update(_EXPAND_AT_OVERRIDES[args.expand_at])
 
     cfg = INCAConfig(**{k: v for k, v in cfg_dict.items()
                         if k in INCAConfig.__dataclass_fields__})
@@ -697,7 +873,8 @@ def main() -> None:
         print("--dry-run: config valid.  Exiting.")
         return
 
-    train(cfg, device)
+    out_dir = train(cfg, device, resume_dir=args.resume_dir)
+    print(f"[train_inca] Run complete → {out_dir}")
 
 
 if __name__ == "__main__":

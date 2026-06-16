@@ -1,0 +1,68 @@
+# E-TIMING: block expansion timing ablation — THE most important figure in Paper B.
+#
+# Core claim: saturation-triggered expansion (INCA default) outperforms both
+# early expansion and late expansion on accuracy and parameter efficiency.
+#
+# Sweep: expand_at ∈ [early, saturation, late, never] × 3 seeds = 12 runs.
+#
+# Mode definitions (override the saturation detector decision):
+#
+#   "saturation"  — INCA default: grow when multi-signal consensus fires
+#                   (rir_threshold=0.30, patience=3, cka_saturation_threshold=0.95)
+#
+#   "early"       — grow after min_epochs_before_grow=1 epoch regardless of signals
+#                   (rir_threshold=99.0 forces immediate BLOCK_FULL after 1 epoch)
+#
+#   "late"        — grow only after epochs_per_period epochs are exhausted
+#                   (rir_threshold=99.0 + patience=999 forces timeout → BLOCK_FULL)
+#
+#   "never"       — no growth; fixed single block for all periods
+#                   (n_max_blocks=1 prevents any grow event from firing)
+#
+# Expected result (concave in timing offset):
+#   saturation ≥ late > never >> early
+#   Rationale: early growth wastes the new block's capacity on a distribution the
+#   old block hasn't saturated yet; late growth over-tunes the current block, reducing
+#   plasticity; never has the worst BWT (no capacity for new domains).
+#
+# Figure plan: Figure 2 in Paper B — accuracy vs expansion timing (bar chart or line),
+# with BWT and PAR as secondary panels. This is the visual headline of the paper.
+#
+# Implementation note:
+#   The runner needs an `expand_at` key that maps to the above rir_threshold / patience
+#   overrides.  The train_inca.py CLI should accept --expand_at and override cfg before
+#   passing to INCAConfig.  This is a 10-line addition to scripts/train_inca.py.
+#   Status: 📝  needs implementation in train_inca.py before running.
+
+defaults:
+  - /configs/paper_b            # Paper B dataset + scale
+
+sweep:
+  expand_at: [early, saturation, late, never]
+  seed:      [42, 123, 999]
+
+dataset:      "domain_sequential"
+n_per_period: 2000
+max_periods:  3
+selector:     "embedding_query"   # hold selector fixed; isolate timing effect
+out_dir:      "results/paper_b/ablations/e_timing"
+
+# Per-mode overrides (applied by the sweep runner based on expand_at value):
+#
+#   expand_at: early
+#     rir_threshold:          99.0   # saturation never fires naturally
+#     rir_negligible:         99.0   # force BLOCK_FULL at patience check
+#     patience:               1
+#     min_epochs_before_grow: 1      # grow after 1 epoch
+#
+#   expand_at: saturation
+#     rir_threshold:          0.30   # default
+#     patience:               3      # default
+#
+#   expand_at: late
+#     rir_threshold:          99.0
+#     patience:               999    # never plateau-fires; grows only at timeout
+#     min_epochs_before_grow: 99     # effectively: grow only when epochs exhausted
+#
+#   expand_at: never
+#     n_max_blocks:           1      # cap at single block; no grow event possible

@@ -18,9 +18,9 @@ from pathlib import Path
 import pytest
 
 # Make the package importable from the repo root
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from Phase1.src.inca_plateau import (
+from models.inca.plateau import (
     INCAPlateauDetector,
     SaturationEvent,
     GradNormTracker,

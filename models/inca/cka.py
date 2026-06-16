@@ -160,8 +160,23 @@ class CKAMonitor:
 
     @staticmethod
     def _items_to_texts(items: List[dict]) -> List[str]:
-        texts = []
+        """Extract input text from heterogeneous item schemas.
+
+        Supports (in priority order):
+          * CC-News v2 stream:      "input_text"  (preferred)
+          * Raw CC-News articles:   "text"
+          * Legacy QA probes:       "question" + optional "evidence"
+        """
+        texts: List[str] = []
         for it in items:
+            inp = (it.get("input_text") or "").strip()
+            if inp:
+                texts.append(inp)
+                continue
+            raw = (it.get("text") or "").strip()
+            if raw:
+                texts.append(raw[:400])
+                continue
             q = (it.get("question") or "").strip()
             e = (it.get("evidence") or "").strip()
             texts.append(f"question: {q} context: {e[:400]}" if e else f"question: {q}")

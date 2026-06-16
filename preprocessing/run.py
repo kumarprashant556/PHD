@@ -65,13 +65,13 @@ def main() -> None:
     parser.add_argument(
         "--cc-output-root",
         type=Path,
-        default=REPO_ROOT / "datasets" / "cc_news" / "processed",
+        default=REPO_ROOT / "local_data" / "cc_news" / "processed",
         help="Where CC-News processed files are written.",
     )
     parser.add_argument(
         "--tic-output-root",
         type=Path,
-        default=REPO_ROOT / "datasets" / "tic_lm" / "processed",
+        default=REPO_ROOT / "local_data" / "tic_lm" / "processed",
         help="Where TiC-LM processed files are written.",
     )
     parser.add_argument(

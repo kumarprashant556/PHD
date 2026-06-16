@@ -20,9 +20,9 @@ import random
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from Phase1.src.inca_replay import INCAReplayBuffer
+from models.inca.replay import INCAReplayBuffer
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────

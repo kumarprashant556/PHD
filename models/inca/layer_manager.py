@@ -155,6 +155,14 @@ class INCALayerManager(nn.Module):
 
         self.blocks: nn.ModuleList = nn.ModuleList([first_block])
 
+        # ── lateral adapters (Phase 2 / E-SCOPE ablation) ─────────────
+        # When lateral_rank > 0, a LateralAdapter is created at each
+        # grow event to blend the frozen predecessor block's output into
+        # the new trainable block's input via a low-rank residual path.
+        # lateral_rank = 0 (default) → no adapters; identical to Phase 1.
+        self.lateral_rank: int = getattr(cfg, "lateral_rank", 0)
+        self.lateral_adapters: nn.ModuleList = nn.ModuleList()
+
         # ── selector ──────────────────────────────────────────────────
         # Chosen via cfg.selector (default: "embedding_query").
         # "embedding_query" — EmbeddingQuerySelector (S-QKV):
@@ -238,8 +246,10 @@ class INCALayerManager(nn.Module):
                 "cannot grow further.  Increase n_max_blocks or stop training."
             )
 
-        # 1. Freeze current block
+        # 1. Freeze current block (and its incoming lateral adapter, if any)
         _freeze(self.current_block)
+        if self.lateral_adapters:
+            _freeze(self.lateral_adapters[-1])
 
         # 2. Add identity-initialised inter-block projection for this
         #    transition and freeze it together with the source block.
@@ -256,10 +266,20 @@ class INCALayerManager(nn.Module):
         _unfreeze(new_block)
         self.blocks.append(new_block)
 
-        # 4. The selector auto-handles new number of blocks since it
-        #    operates on the dynamic list; no structural change needed
-        #    (CrossAttentionSelector's gate MLP re-uses the same weights
-        #    for all blocks — each pooled repr is projected independently).
+        # 4. Notify the selector that another block has been added.
+        #    Most selectors are structure-agnostic (they iterate the
+        #    dynamic block list), but WeightedSumSelector keeps a fixed
+        #    Parameter vector per block and must grow it explicitly.
+        if hasattr(self.selector, "grow"):
+            self.selector.grow()
+
+        # 5. Lateral adapter (E-SCOPE / Phase 2).
+        #    One adapter per block transition: adapter[i] mediates block[i] → block[i+1].
+        #    Initialised with up-projection zeroed → tanh(0)=0 → pure identity at attach.
+        #    Frozen together with its source block at the NEXT freeze_and_grow() call.
+        if self.lateral_rank > 0:
+            from .lateral import LateralAdapter
+            self.lateral_adapters.append(LateralAdapter(self.d_model, rank=self.lateral_rank))
 
     # ── forward ───────────────────────────────────────────────────────
 
@@ -295,12 +315,29 @@ class INCALayerManager(nn.Module):
             # Adding embedding_hidden gives the block a direct path back to
             # the original token representations regardless of chain depth.
             if i > 0:
+                # Capture the raw frozen-block output BEFORE the projection
+                # so the lateral adapter can use it as its frozen_out signal.
+                prev_chain = chain_hidden
+
                 proj = self.inter_block_projs[i - 1]
                 if is_current:
                     chain_hidden = proj(chain_hidden) + embedding_hidden
                 else:
                     with torch.no_grad():
                         chain_hidden = proj(chain_hidden) + embedding_hidden
+
+                # ── lateral adapter (E-SCOPE / Phase 2) ───────────────
+                # adapter[i-1] blends prev block's raw output (prev_chain)
+                # into the new block's prepared input (chain_hidden).
+                # Only runs if lateral_rank > 0 and adapter exists.
+                lat_idx = i - 1
+                if lat_idx < len(self.lateral_adapters):
+                    lat = self.lateral_adapters[lat_idx]
+                    if is_current:
+                        chain_hidden = lat(chain_hidden, prev_chain)
+                    else:
+                        with torch.no_grad():
+                            chain_hidden = lat(chain_hidden, prev_chain)
 
             # ── block forward ──────────────────────────────────────────
             if is_current:
@@ -346,6 +383,12 @@ class INCALayerManager(nn.Module):
             incoming_proj = self.inter_block_projs[-1]
             _unfreeze(incoming_proj)
             params.extend(p for p in incoming_proj.parameters() if p.requires_grad)
+        # The latest lateral adapter (E-SCOPE) mediates the transition into
+        # the current block and is trainable together with it.  Earlier
+        # adapters are frozen with their source blocks.
+        if self.lateral_adapters:
+            params.extend(p for p in self.lateral_adapters[-1].parameters()
+                          if p.requires_grad)
         return params
 
     @torch.no_grad()
@@ -373,6 +416,8 @@ class INCALayerManager(nn.Module):
             "blocks_state": [b.state_dict() for b in self.blocks],
             "selector_state": self.selector.state_dict(),
             "proj_states": [p.state_dict() for p in self.inter_block_projs],
+            # Lateral adapters (E-SCOPE / Phase 2); empty list when lateral_rank=0.
+            "lateral_states": [l.state_dict() for l in self.lateral_adapters],
         }
 
     def load_manager_state(self, state: dict) -> None:
@@ -394,3 +439,8 @@ class INCALayerManager(nn.Module):
         for proj, sd in zip(self.inter_block_projs,
                             state.get("proj_states", [])):
             proj.load_state_dict(sd)
+        # Restore lateral adapter weights (backwards-compatible: absent in
+        # Phase 1 / lateral_rank=0 checkpoints).
+        for lat, lat_sd in zip(self.lateral_adapters,
+                               state.get("lateral_states", [])):
+            lat.load_state_dict(lat_sd)

@@ -1,3 +1,7 @@
+> **ARCHIVED 2026-06-16** — Superseded by [`docs/dataset_strategy_FINAL.md`](../dataset_strategy_FINAL.md),
+> which merges this web-research evidence with the gap analysis and engineering schema.
+> Retained here as evidence/background only. Do not edit.
+
 # Dataset & Data-Format Research Report for CAPSEL/INCA
 
 **Question:** What dataset(s) and what data *format* best serve a saturation-driven, continually-growing

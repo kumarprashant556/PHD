@@ -1,12 +1,14 @@
 # E-ROUTE: routing selector ablation
-# Runs 4 selectors x 3 seeds = 12 total runs
+# Runs 4 selectors × 3 seeds = 12 total runs.
+# Expected: embedding_query ≥ uclbr > cross_attention > weighted_sum.
 defaults:
-  - /configs/inca
+  - /configs/paper_b            # Paper B dataset + scale
 
 sweep:
   selector: [embedding_query, uclbr, cross_attention, weighted_sum]
   seed:     [42, 123, 999]
 
-dataset:       cc_news
-n_periods:     6
-items_per_period: 20000
+dataset:      "domain_sequential"
+n_per_period: 2000
+max_periods:  3
+out_dir:      "results/paper_b/ablations/e_route"

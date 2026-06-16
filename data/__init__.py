@@ -22,11 +22,12 @@ loader = make_dataloader(tok["2018_H1"], batch_size=32)
 
 Dataset registry (text-completion only)
 ----------------------------------------
-"cc_news"       local datasets/cc_news/             Phase 1 primary  (4 half-year periods)
-"streaming_qa"  local datasets/streaming_qa/        CC-News corpus   (26 monthly periods)
-"temporalwiki"  local datasets/temporalwiki/        Wikipedia snaps  (2 periods)
-"tic_lm"        local datasets/tic_lm/              C4 daily slices  (9 periods)
-"redpajama"     RedPajama-Data-V2 (HF streaming)    E-ROUTE benchmark
+"cc_news"             local local_data/cc_news/             Phase 1 primary  (4 half-year periods)
+"streaming_qa"        local local_data/streaming_qa/        CC-News corpus   (26 monthly periods)
+"temporalwiki"        local local_data/temporalwiki/        Wikipedia snaps  (2 periods)
+"tic_lm"              local local_data/tic_lm/              C4 daily slices  (9 periods)
+"redpajama"           RedPajama-Data-V2 (HF streaming)    E-ROUTE benchmark
+"domain_sequential"   HF: MATH + the-stack-smol + SciQ    Paper B primary  (3 domains)
 """
 
 from __future__ import annotations
@@ -42,11 +43,13 @@ except Exception:  # pragma: no cover - allows lightweight preprocessing without
 
 _LOADERS = {
     # ── Text-completion datasets (seq2seq training) ───────────────────────────
-    "cc_news":      ("data.cc_news",      "load_cc_news_periods"),
-    "streaming_qa": ("data.streaming_qa", "load_streaming_qa_periods"),
-    "temporalwiki": ("data.temporalwiki", "load_temporalwiki_periods"),
-    "tic_lm":       ("data.tic_lm",       "load_tic_lm_periods"),
-    "redpajama":    ("data.redpajama",    "load_redpajama_periods"),
+    "cc_news":            ("data.cc_news",            "load_cc_news_periods"),
+    "streaming_qa":       ("data.streaming_qa",       "load_streaming_qa_periods"),
+    "temporalwiki":       ("data.temporalwiki",       "load_temporalwiki_periods"),
+    "tic_lm":             ("data.tic_lm",             "load_tic_lm_periods"),
+    "redpajama":          ("data.redpajama",          "load_redpajama_periods"),
+    # ── Paper B: domain-sequential curriculum (math → code → science) ────────
+    "domain_sequential":  ("data.domain_sequential",  "load_domain_sequential_periods"),
     # ── QA / MCQ datasets excluded from training ─────────────────────────────
     # "ckl":        excluded — TriviaQA/WebQuestions MCQ format
     # "realtimeqa": excluded — weekly news QA/MCQ format

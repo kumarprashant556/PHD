@@ -1,3 +1,7 @@
+> **ARCHIVED 2026-06-16** — Superseded by [`docs/dataset_strategy_FINAL.md`](../dataset_strategy_FINAL.md),
+> which merges this document's problem statement with the research report and engineering schema.
+> Retained here as evidence/background only. Do not edit.
+
 # Dataset Gap Analysis for CAPSEL/INCA Research
 
 ## What the existing benchmarks were designed for

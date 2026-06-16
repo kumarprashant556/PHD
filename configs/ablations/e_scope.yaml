@@ -1,0 +1,32 @@
+# E-SCOPE: lateral adapter rank ablation  (Phase 2)
+#
+# Tests whether low-rank cross-block lateral connections improve accuracy and
+# reduce the "cold-start" penalty of a newly added block.
+#
+# Sweep: lateral_rank ∈ [0, 4, 8, 16] × 3 seeds = 12 runs.
+#
+# lateral_rank = 0 → Phase 1 (no lateral adapters) — matches main Paper B config.
+# lateral_rank > 0 → Phase 2: output = hidden + tanh(alpha) × up(down(frozen_out))
+#   alpha init = 0.0 (function-preserving start)
+#   up  init   = zeros (ensures identity at initialisation)
+#   D   → rank → D  bottleneck (D = d_model = 768 for flan-t5-base)
+#
+# Expected: small rank (4 or 8) matches rank=16 but uses fewer params.
+# Paper treatment: lateral adapters are appendix-only in Paper B (main table uses rank=0).
+# If E-SCOPE shows ≥ 1% improvement, promote to main table for the camera-ready.
+#
+# Prerequisite: models/inca/lateral.py must be activated (currently disabled at rank=0).
+# Status: 📝  configs ready; lateral.py implementation needs verification before running.
+
+defaults:
+  - /configs/paper_b            # Paper B dataset + scale
+
+sweep:
+  lateral_rank: [0, 4, 8, 16]
+  seed:         [42, 123, 999]
+
+dataset:      "domain_sequential"
+n_per_period: 2000
+max_periods:  3
+selector:     "embedding_query"   # hold selector fixed; isolate lateral rank effect
+out_dir:      "results/paper_b/ablations/e_scope"

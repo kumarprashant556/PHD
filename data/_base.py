@@ -24,9 +24,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 # ── HuggingFace datasets import guard ────────────────────────────────────────
-# Callers often do sys.path.insert(0, REPO_ROOT) before importing this module.
-# That places the local datasets/ data directory on sys.path before installed
-# packages, so `import datasets` silently resolves to the wrong location.
+# Kept for safety. Previously the local datasets/ directory (now renamed to
+# local_data/) shadowed the HuggingFace package when repo root was on sys.path.
 # Strip repo-root and CWD entries for this import only, then restore.
 _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 _sp_backup = sys.path[:]

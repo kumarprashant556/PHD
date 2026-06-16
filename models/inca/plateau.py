@@ -190,7 +190,7 @@ class INCAPlateauDetector:
             decay_frac=cfg.grad_norm_decay_frac,
         )
         self.loss_tracker  = LossPlateauTracker(patience=cfg.patience)
-        self.rir_tracker   = RIRTracker(chance=0.0)
+        self.rir_tracker   = RIRTracker(chance=getattr(cfg, "chance", 0.0))
 
         self._n_eval_steps: int = 0  # eval steps since period start
 

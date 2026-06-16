@@ -2,7 +2,7 @@
 
 Primary dataset for Phase 1 INCA training.
 
-Source (primary)  : datasets/cc_news/raw/raw.jsonl              ← local, instant
+Source (primary)  : local_data/cc_news/raw/raw.jsonl              ← local, instant
 Source (fallback) : vblagoje/cc_news on HuggingFace             ← downloaded on first use
 Coverage          : ~630K English news articles, 2017–2019
 Period key        : "YYYY_H{1|2}"  — half-year buckets
@@ -32,8 +32,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# Guard against the local datasets/ folder shadowing HuggingFace's `datasets` package.
-# Without this, `from datasets import Dataset` silently imports the wrong module.
+# Guard kept for safety (local_data/ no longer shadows HuggingFace, but harmless).
 _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 _sp_backup = sys.path[:]
 sys.path = [p for p in sys.path if p not in ("", ".", _REPO_ROOT)]
@@ -51,9 +50,9 @@ DEFAULT_PERIODS: List[str] = [
     "2018_H1", "2018_H2",
 ]
 
-# Path to the locally cached raw JSONL  (datasets/cc_news/raw.jsonl at repo root)
-_LOCAL_JSONL = Path(__file__).resolve().parent.parent / "datasets" / "cc_news" / "raw" / "raw.jsonl"
-_PROCESSED_ROOT = Path(__file__).resolve().parent.parent / "datasets" / "cc_news" / "processed"
+# Path to the locally cached raw JSONL  (local_data/cc_news/raw.jsonl at repo root)
+_LOCAL_JSONL = Path(__file__).resolve().parent.parent / "local_data" / "cc_news" / "raw" / "raw.jsonl"
+_PROCESSED_ROOT = Path(__file__).resolve().parent.parent / "local_data" / "cc_news" / "processed"
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -235,11 +234,11 @@ def load_cc_news_periods(
     """Load CC-News and return half-year temporal period datasets.
 
     Source priority (highest → lowest):
-      1. datasets/cc_news/processed/stream_v2/  ← preferred: already-formatted
+      1. local_data/cc_news/processed/stream_v2/  ← preferred: already-formatted
          task/input/target examples (completion + salient_span_denoising).
          Auto-detected when the directory exists; or forced with
          processed_version="v2".
-      2. datasets/cc_news/raw/raw.jsonl          ← local raw cache
+      2. local_data/cc_news/raw/raw.jsonl          ← local raw cache
       3. vblagoje/cc_news on HuggingFace         ← downloaded on first use
 
     Parameters

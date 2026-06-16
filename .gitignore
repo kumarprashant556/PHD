@@ -9,7 +9,7 @@ build/
 .eggs/
 
 # ── Raw datasets (large files — do not commit)
-datasets/
+local_data/
 
 # ── Training outputs ──────────────────────────────────────────────────────────
 results/
@@ -38,6 +38,9 @@ data/cache/
 *.swp
 *.swo
 *.~lock.*
+
+# ── Claude Code local settings ────────────────────────────────────────────────
+.claude/settings.local.json
 
 # ── Secrets ───────────────────────────────────────────────────────────────────
 .env

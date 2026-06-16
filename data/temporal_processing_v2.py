@@ -65,8 +65,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CC_NEWS_RAW = REPO_ROOT / "datasets" / "cc_news" / "raw" / "raw.jsonl"
-DEFAULT_TIC_LM_RAW_DIR = REPO_ROOT / "datasets" / "tic_lm" / "raw"
+DEFAULT_CC_NEWS_RAW = REPO_ROOT / "local_data" / "cc_news" / "raw" / "raw.jsonl"
+DEFAULT_TIC_LM_RAW_DIR = REPO_ROOT / "local_data" / "tic_lm" / "raw"
 
 STREAM_DIRNAME = "stream_v2"
 PROBES_DIRNAME = "probes_v2"
@@ -131,7 +131,7 @@ class PeriodBucket:
 
 def process_cc_news_raw(
     raw_path: Path = DEFAULT_CC_NEWS_RAW,
-    output_root: Path = REPO_ROOT / "datasets" / "cc_news" / "processed",
+    output_root: Path = REPO_ROOT / "local_data" / "cc_news" / "processed",
     period_granularity: str = "half_year",
     max_docs_per_period: int = 0,
     probes_per_period: int = 300,
@@ -164,7 +164,7 @@ def process_cc_news_raw(
 
 def process_tic_lm_raw(
     raw_dir: Path = DEFAULT_TIC_LM_RAW_DIR,
-    output_root: Path = REPO_ROOT / "datasets" / "tic_lm" / "processed",
+    output_root: Path = REPO_ROOT / "local_data" / "tic_lm" / "processed",
     period_granularity: str = "day",
     max_docs_per_period: int = 0,
     probes_per_period: int = 300,

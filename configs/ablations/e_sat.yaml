@@ -1,9 +1,15 @@
 # E-SAT: saturation detector comparison
-# threshold-INCA vs RIR-only vs multi-signal vs SPRT
+# Sweeps rir_threshold × patience × seed = 3×3×3 = 27 runs.
+# Expected: flat plateau around (rir_threshold=0.30, patience=3) on Paper B data.
 defaults:
-  - /configs/inca
+  - /configs/paper_b            # Paper B dataset + scale
 
 sweep:
   rir_threshold: [0.20, 0.30, 0.40]
   patience:      [3, 5, 8]
   seed:          [42, 123, 999]
+
+dataset:      "domain_sequential"
+n_per_period: 2000
+max_periods:  3
+out_dir:      "results/paper_b/ablations/e_sat"

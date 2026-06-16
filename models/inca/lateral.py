@@ -39,8 +39,13 @@ class LateralAdapter(nn.Module):
         hidden: torch.Tensor,          # (B, S, D) — current block input
         frozen_out: torch.Tensor,      # (B, S, D) — frozen block output
     ) -> torch.Tensor:
-        """Return hidden + tanh(alpha) * adapter(frozen_out)."""
-        adapter_signal = self.up(torch.tanh(self.down(frozen_out)))
+        """Return hidden + tanh(alpha) * adapter(frozen_out).
+
+        The adapter is a plain low-rank linear factorisation (no
+        non-linearity between down and up projections), matching the
+        CAPSEL memorandum Part IV specification.
+        """
+        adapter_signal = self.up(self.down(frozen_out))
         return hidden + torch.tanh(self.alpha) * adapter_signal
 
     def extra_repr(self) -> str:

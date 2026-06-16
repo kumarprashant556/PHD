@@ -33,6 +33,8 @@ class BaseConfig:
     max_grad_norm:          float = 1.0    # gradient clipping
     gradient_checkpointing: bool  = False  # recompute activations (saves VRAM, slower)
     use_adafactor:          bool  = False  # Adafactor instead of AdamW (lower memory)
+    precision:              str   = "bf16" # "bf16" | "fp16" | "fp32"; bf16 ≈ 2× speed on
+                                            #   M2+/Ampere+, fp16 unstable on T5
     ppl_eval_frac:          float = 0.05   # fraction of period used for perplexity eval
     seed:                   int   = 42
     fp16:                   bool  = False
@@ -60,6 +62,7 @@ class INCAConfig(BaseConfig):
     rir_negligible:       float = 0.05   # max RIR for BLOCK_FULL to fire
     grad_norm_ema_alpha:  float = 0.10   # EMA smoothing factor for grad-norm tracker
     grad_norm_decay_frac: float = 0.50   # "decayed" if current < frac × peak
+    chance:               float = 0.0    # RIR baseline rate (0.25 for 4-way MCQ; 0.0 for open-answer)
 
     # ── CKA reference set (T1.5) ──────────────────────────────────────
     cka_ref_size:             int   = 200   # items cached at period start
@@ -93,6 +96,9 @@ class INCAConfig(BaseConfig):
     uclbr_heads:           int   = 4
     uclbr_bias_lr:         float = 1e-3
     uclbr_top_k:           int   = 0    # 0 = soft gate; >0 = hard top-k sparsity
+
+    # ── Replay sampling per period ─────────────────────────────────────
+    replay_n_per_period: int = 2_000   # # items drawn from buffer at period start
 
     # ── Output ────────────────────────────────────────────────────────
     out_dir: str = "results"   # training run outputs (relative to repo root)

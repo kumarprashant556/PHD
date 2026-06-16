@@ -25,6 +25,11 @@ model_name: google/flan-t5-base
 model_type: seq2seq          # seq2seq | causal
 max_periods: 4               # 2017_H1 · 2017_H2 · 2018_H1 · 2018_H2 (2019 has <2 docs)
 max_train_probes: 2000        # cap training probes per period (0 = no cap; 2000 is good default)
+n_per_period: 25000          # Production budget — overnight sweep tier.
+                             # Stream files have up to 691k items per period; 25k is the
+                             # balance: enough signal to differentiate baselines while the
+                             # full B1-B7 sweep fits in ~12 h on M3 MPS (≈1.7 h/baseline)
+                             # at bf16 + Adafactor + effective batch 64.
 
 # training budget (tuned for flan-t5-base on MPS / ≤32 GB unified memory)
 # Memory budget breakdown for MPS:
@@ -34,19 +39,30 @@ max_train_probes: 2000        # cap training probes per period (0 = no cap; 2000
 #   activations    ~4 GB  (seq_len=128, batch=4, 12 enc+dec layers)
 #   MPS overhead   ~2 GB
 #   Total          ~10 GB  ← fits comfortably in 27 GB MPS budget
-epochs_per_period: 3
-batch_size: 4                # ↓ from 8; MPS OOM with batch=8 + seq=256 (T5 cross-attn is O(seq²))
-lr: 2.0e-5
+epochs_per_period: 3          # Standard CL setting; enough passes for the model to fit
+                              # 25k items without overfitting the smaller (2018_H2) period.
+batch_size: 32               # ↑ from 16; bf16+Adafactor fits batch=32 in MPS unified mem
+                              # (≈12 GB on flan-t5-base). Doubles throughput vs bs=16.
+lr: 1.0e-4                   # Adafactor likes a higher LR than AdamW; cosine schedule.
 weight_decay: 0.0
 max_grad_norm: 1.0
-max_input_length: 128        # ↓ from 256; 4× less attention memory (quadratic in seq_len)
-max_target_length: 64        # ↓ from 256; decoder also attends over encoder output
+max_input_length: 128        # 4× less attention memory than seq=256 (quadratic)
+max_target_length: 64        # decoder also attends over encoder output
 max_new_tokens: 32           # token generation cap during eval
-grad_accum_steps: 8          # effective batch = 4×8 = 32 (same as before)
+grad_accum_steps: 2          # effective batch = 32×2 = 64
 warmup_ratio: 0.06
 log_every_n_steps: 50
-gradient_checkpointing: true  # recompute activations on backward → ~40% less peak memory
-use_adafactor: false          # true = Adafactor (3-4× lower optimizer memory, try if still OOM)
+
+# Precision + memory bundle for MPS / M3+ (CUDA users: same settings work).
+#   precision=bf16: ~2× matmul throughput on M3+/Ampere+, ~50% memory vs fp32.
+#                   T5 is numerically stable in bf16 (fp16 NaN-cascades — don't use).
+#   use_adafactor=true: T5's native optimizer; factored 2nd moment instead of (m,v).
+#                       Frees ~2× model size of optimizer state vs AdamW.
+#   gradient_checkpointing=false: bf16+Adafactor saved enough memory; skip the
+#                                  ~20% recompute slowdown.
+precision: bf16
+use_adafactor: true
+gradient_checkpointing: false
 
 # eval
 ppl_eval_samples: 300

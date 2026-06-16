@@ -115,23 +115,29 @@ class EmbeddingQuerySelector(nn.Module):
     ) -> torch.Tensor:
         """Aggregate block outputs using fixed embedding queries.
 
+        **Per-block independent attention** (spec: CAPSEL_Selector_Architecture).
+        For each block i compute Attention(Q, K_i, V_i) separately, derive a
+        scalar relevance score from the mean diagonal alignment between Q and
+        K_i, softmax over the n_blocks axis to get block weights, then form
+        the final output as a weighted sum of the n per-block attended outputs.
+        Concatenating K/V across blocks (the old, incorrect approach) would
+        conflate block selection with within-block token selection.
+
         Parameters
         ----------
         block_outputs : list of (B, S, D)
             One tensor per block, frozen blocks first.
         attention_mask : (B, S) bool/int optional
-            1 = real token, 0 = padding.  Prevents padding tokens from
-            contaminating attention scores.
+            1 = real token, 0 = padding.
         embedding_hidden : (B, S, D) optional
-            Raw token embeddings (before any block).  Must be provided
-            when n_blocks > 1; ignored (short-circuits) when n_blocks == 1.
+            Raw token embeddings (before any block).  Required when
+            n_blocks > 1; ignored when n_blocks == 1.
 
         Returns
         -------
         (B, S, D)
         """
         if len(block_outputs) == 1:
-            # Single block: no aggregation needed.
             return block_outputs[0]
 
         if embedding_hidden is None:
@@ -144,46 +150,55 @@ class EmbeddingQuerySelector(nn.Module):
         n = len(block_outputs)
         h, d = self.n_heads, self.head_dim
 
-        # ── Query: raw embeddings, reshaped for multi-head ──────────────
-        # No projection — embeddings are used as-is.
-        # Shape: (B, h, S, d)
+        # ── Q from frozen embeddings (no projection) ───────────────────
         Q = embedding_hidden.view(B, S, h, d).transpose(1, 2)   # (B, h, S, d)
 
-        # ── Keys and Values: one per block ──────────────────────────────
-        # Stack all block outputs along the "block" axis first, project
-        # once, then split back.  More efficient than n separate calls.
-        #
-        # blocks_cat : (B, n*S, D)
-        blocks_cat = torch.cat(block_outputs, dim=1)
+        # ── Per-block attention loop ───────────────────────────────────
+        per_block_out:   List[torch.Tensor] = []
+        per_block_score: List[torch.Tensor] = []
 
-        K = self.k_proj(blocks_cat).view(B, n, S, h, d)   # (B, n, S, h, d)
-        V = self.v_proj(blocks_cat).view(B, n, S, h, d)
-
-        # Reshape to (B, h, n*S, d) so matmul gives (B, h, S, n*S)
-        K = K.permute(0, 3, 1, 2, 4).reshape(B, h, n * S, d)  # (B, h, n*S, d)
-        V = V.permute(0, 3, 1, 2, 4).reshape(B, h, n * S, d)
-
-        # ── Scaled dot-product attention ────────────────────────────────
-        # scores : (B, h, S, n*S)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-
-        # Mask padding positions in K so they don't attract attention.
+        # Build the key-side padding mask once
         if attention_mask is not None:
-            # attention_mask: (B, S)  →  (B, 1, 1, n*S)
-            # Repeat the mask n times (once per block) along the key axis.
-            kv_mask = attention_mask.unsqueeze(1).repeat(1, n, 1)   # (B, n*S)
-            kv_mask = kv_mask.unsqueeze(1).unsqueeze(2)             # (B,1,1,n*S)
-            scores = scores.masked_fill(kv_mask == 0, float("-inf"))
+            k_pad = attention_mask.unsqueeze(1).unsqueeze(2)        # (B,1,1,S)
+        else:
+            k_pad = None
 
-        weights = F.softmax(scores, dim=-1)     # (B, h, S, n*S)
-        # Replace any NaN from all-padding rows with uniform weights
-        weights = torch.nan_to_num(weights, nan=1.0 / (n * S))
-        weights = self.attn_drop(weights)
+        for out_i in block_outputs:
+            K_i = self.k_proj(out_i).view(B, S, h, d).transpose(1, 2)   # (B, h, S, d)
+            V_i = self.v_proj(out_i).view(B, S, h, d).transpose(1, 2)
 
-        # ── Weighted sum → output ────────────────────────────────────────
-        # (B, h, S, n*S) × (B, h, n*S, d) → (B, h, S, d)
-        out = torch.matmul(weights, V)
-        out = out.transpose(1, 2).reshape(B, S, D)   # (B, S, D)
+            scores_i = torch.matmul(Q, K_i.transpose(-2, -1)) * self.scale  # (B, h, S, S)
+            if k_pad is not None:
+                scores_i = scores_i.masked_fill(k_pad == 0, float("-inf"))
+
+            weights_i = F.softmax(scores_i, dim=-1)                  # (B, h, S, S)
+            weights_i = torch.nan_to_num(weights_i, nan=1.0 / S)
+            weights_i = self.attn_drop(weights_i)
+
+            attn_i = torch.matmul(weights_i, V_i)                    # (B, h, S, d)
+            attn_i = attn_i.transpose(1, 2).reshape(B, S, D)         # (B, S, D)
+            per_block_out.append(attn_i)
+
+            # Block relevance score: mean Q·K_i alignment at matching positions
+            # (diagonal of scores_i: how well block i's representation aligns
+            # with the original token embedding at each position).
+            diag_i = scores_i.diagonal(dim1=-2, dim2=-1)             # (B, h, S)
+            if attention_mask is not None:
+                am = attention_mask.unsqueeze(1).float()             # (B, 1, S)
+                denom = am.sum(dim=-1).clamp(min=1)                  # (B, 1)
+                diag_i = (diag_i * am).sum(dim=-1) / denom           # (B, h)
+            else:
+                diag_i = diag_i.mean(dim=-1)                         # (B, h)
+            per_block_score.append(diag_i.mean(dim=-1))              # (B,)
+
+        # ── Softmax over n_blocks → block weights (B, n) ───────────────
+        block_scores  = torch.stack(per_block_score, dim=-1)         # (B, n)
+        block_weights = F.softmax(block_scores, dim=-1)              # (B, n)
+
+        # ── Weighted sum of per-block attended outputs ─────────────────
+        stacked = torch.stack(per_block_out, dim=1)                  # (B, n, S, D)
+        w       = block_weights.unsqueeze(-1).unsqueeze(-1)          # (B, n, 1, 1)
+        out     = (stacked * w).sum(dim=1)                           # (B, S, D)
         return self.out_proj(out)
 
 

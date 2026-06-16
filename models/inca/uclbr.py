@@ -213,82 +213,73 @@ class UCLBRSelector(nn.Module):
         query_src = embedding_hidden if embedding_hidden is not None else block_outputs[-1]
 
         # ── Step 1: Read-ME pre-gate ───────────────────────────────────
-        # Compute relevance score r_i for each block from its mean-pool.
-        # Shape: (B, n)
+        # Per-block scalar relevance from its mean-pool. (B, n)
         pooled = torch.stack(
             [self._mean_pool(h, attention_mask) for h in block_outputs], dim=1
         )  # (B, n, D)
-        relevance = self.pre_gate(pooled).squeeze(-1)   # (B, n)  ∈ (0,1)
+        relevance = self.pre_gate(pooled).squeeze(-1)            # (B, n) ∈ (0,1)
 
         if self.top_k > 0 and self.top_k < n:
-            # Hard sparsity: zero out all but top-k by relevance
-            topk_vals, topk_idx = relevance.topk(self.top_k, dim=-1)
+            _, topk_idx = relevance.topk(self.top_k, dim=-1)
             mask_hard = torch.zeros_like(relevance)
             mask_hard.scatter_(1, topk_idx, 1.0)
             relevance = relevance * mask_hard
 
-        # ── Step 2: Routing attention with load-balance bias ───────────
-        # Q from frozen embeddings (no projection), shape (B, h, S, d)
-        Q = query_src.view(B, S, h_dim, d).transpose(1, 2)     # (B, h, S, d)
+        # ── Step 2: Per-block routing attention (independent per block) ─
+        # Q from frozen embeddings (no projection).
+        Q = query_src.view(B, S, h_dim, d).transpose(1, 2)        # (B, h, S, d)
 
-        # K, V from all blocks concatenated along sequence axis
-        blocks_cat = torch.cat(block_outputs, dim=1)            # (B, n*S, D)
-        K = self.k_proj(blocks_cat).view(B, n * S, h_dim, d).transpose(1, 2)
-        V = self.v_proj(blocks_cat).view(B, n * S, h_dim, d).transpose(1, 2)
-
-        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (B, h, S, n*S)
-
-        # Mask padding keys
         if attention_mask is not None:
-            kv_mask = attention_mask.unsqueeze(1).repeat(1, n, 1)   # (B, n*S)
-            kv_mask = kv_mask.unsqueeze(1).unsqueeze(2)             # (B,1,1,n*S)
-            scores = scores.masked_fill(kv_mask == 0, float("-inf"))
+            k_pad = attention_mask.unsqueeze(1).unsqueeze(2)      # (B,1,1,S)
+        else:
+            k_pad = None
 
-        # Sequence-level routing weights by averaging attention across positions
-        # and heads: (B, h, S, n*S) → (B, n)
-        scores_seq = scores.mean(dim=(1, 2))            # (B, n*S)  avg over heads+positions
-        scores_by_block = scores_seq.view(B, n, S).mean(dim=-1)   # (B, n) avg over tokens
+        per_block_out:   List[torch.Tensor] = []
+        per_block_score: List[torch.Tensor] = []                  # block relevance (B,)
 
-        # Add load-balance bias (sequence-level only, not token-level)
-        biased_logits = scores_by_block + self.lb_bias[:n].unsqueeze(0)  # (B, n)
+        for out_i in block_outputs:
+            K_i = self.k_proj(out_i).view(B, S, h_dim, d).transpose(1, 2)
+            V_i = self.v_proj(out_i).view(B, S, h_dim, d).transpose(1, 2)
+            scores_i = torch.matmul(Q, K_i.transpose(-2, -1)) * self.scale  # (B, h, S, S)
+            if k_pad is not None:
+                scores_i = scores_i.masked_fill(k_pad == 0, float("-inf"))
+            w_i = F.softmax(scores_i, dim=-1)                     # (B, h, S, S)
+            w_i = torch.nan_to_num(w_i, nan=1.0 / S)
+            attn_i = torch.matmul(w_i, V_i)                       # (B, h, S, d)
+            attn_i = attn_i.transpose(1, 2).reshape(B, S, D)      # (B, S, D)
+            per_block_out.append(attn_i)
 
-        # Apply pre-gate: multiply logits by relevance before softmax
-        # Blocks with low relevance get their logits suppressed
-        biased_logits = biased_logits * relevance
+            diag_i = scores_i.diagonal(dim1=-2, dim2=-1)          # (B, h, S)
+            if attention_mask is not None:
+                am = attention_mask.unsqueeze(1).float()          # (B, 1, S)
+                denom = am.sum(dim=-1).clamp(min=1)               # (B, 1)
+                diag_i = (diag_i * am).sum(dim=-1) / denom        # (B, h)
+            else:
+                diag_i = diag_i.mean(dim=-1)
+            per_block_score.append(diag_i.mean(dim=-1))           # (B,)
 
-        routing_weights = F.softmax(biased_logits, dim=-1)           # (B, n)
+        # Per-block routing logits (B, n)
+        block_scores = torch.stack(per_block_score, dim=-1)       # (B, n)
+
+        # ── Step 3: DeepSeek auxiliary-loss-free load-balance bias ─────
+        # Bias added at the block level, then pre-gate relevance gates each block.
+        biased_logits = (block_scores + self.lb_bias[:n].unsqueeze(0)) * relevance  # (B, n)
+        routing_weights = F.softmax(biased_logits, dim=-1)        # (B, n)
 
         # Update load-balance bias online
         self._update_load_bias(routing_weights.detach(), n)
 
-        # ── Step 3: Uncertainty-calibrated confidence ──────────────────
-        # Normalised entropy H̃ = H / log(n)  ∈ [0, 1]
-        # c = learned function of H̃; interpolate router ↔ uniform
+        # ── Step 4: Uncertainty-calibrated confidence ──────────────────
         eps = 1e-9
-        H = -(routing_weights * (routing_weights + eps).log()).sum(dim=-1, keepdim=True)  # (B,1)
-        H_norm = H / math.log(n)                                     # (B,1) ∈ [0,1]
-        c = self.conf_head(H_norm)                                   # (B,1) ∈ (0,1)
+        H = -(routing_weights * (routing_weights + eps).log()).sum(dim=-1, keepdim=True)
+        H_norm = H / math.log(n)                                  # (B, 1) ∈ [0, 1]
+        c = self.conf_head(H_norm)                                # (B, 1) ∈ (0, 1)
 
-        uniform = torch.full_like(routing_weights, 1.0 / n)          # (B, n)
-        final_w = c * routing_weights + (1.0 - c) * uniform          # (B, n)
+        uniform = torch.full_like(routing_weights, 1.0 / n)       # (B, n)
+        final_w = c * routing_weights + (1.0 - c) * uniform       # (B, n)
 
-        # ── Step 4: Token-level weighted aggregation ───────────────────
-        # Full token-level attention output using final routing weights
-        attn_out = torch.matmul(
-            F.softmax(scores, dim=-1),  # (B, h, S, n*S)
-            V,                          # (B, h, n*S, d)
-        )  # (B, h, S, d)
-        attn_out = attn_out.transpose(1, 2).reshape(B, S, D)         # (B, S, D)
-
-        # Scale token-level output by per-block confidence-adjusted weights
-        # Reshape final_w to (B, 1, n) so we can broadcast over sequence
-        # Compute per-position weighted sum across blocks
-        block_stack = torch.stack(block_outputs, dim=2)              # (B, S, n, D)
-        w_expand = final_w.unsqueeze(1).unsqueeze(-1)                # (B, 1, n, 1)
-        weighted_blocks = (block_stack * w_expand).sum(dim=2)        # (B, S, D)
-
-        # Blend: 50% pure block aggregation + 50% attention-refined output
-        # This keeps the routing interpretable while leveraging attention quality
-        out = 0.5 * weighted_blocks + 0.5 * attn_out
-
-        return self.out_proj(out)                                     # (B, S, D)
+        # ── Step 5: Weighted sum of per-block attended outputs ─────────
+        stacked = torch.stack(per_block_out, dim=1)               # (B, n, S, D)
+        w       = final_w.unsqueeze(-1).unsqueeze(-1)             # (B, n, 1, 1)
+        out     = (stacked * w).sum(dim=1)                        # (B, S, D)
+        return self.out_proj(out)

@@ -1,3 +1,7 @@
+> **ARCHIVED 2026-06-16** — Superseded by [`docs/dataset_strategy_FINAL.md`](../dataset_strategy_FINAL.md),
+> which merges this engineering-schema document with the gap analysis and research report.
+> Retained here as evidence/background only. Do not edit.
+
 # CAPSEL/INCA Dataset Strategy Report
 
 Date: 2026-06-15

@@ -48,7 +48,7 @@ warmup_steps:        200                  # warmup to 1e-4 over 200 steps
 warmup_ratio:        0.06
 grad_accum_steps:    4                    # effective batch = 8 × 4 = 32 (unchanged)
 max_grad_norm:       1.0                  # standard FLAN-T5 clipping
-gradient_checkpointing: true              # recompute activations — safe for INCA
+gradient_checkpointing: false             # GradientCheckpointingLayer uses super() which crashes on Python 3.12; flan-t5-base fits without GC
 use_adafactor:       false
 ppl_eval_frac:       0.10
 seed:                42

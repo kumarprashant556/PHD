@@ -4,7 +4,12 @@
       "Bash(pandoc --track-changes=all \"/Users/nishantkumar/Desktop/phd/code/My project/WorkingDir/CAPSEL_research_memorandum_FINAL.docx\" -o /tmp/capsel_memo.md)",
       "Read(//tmp/**)",
       "Bash(pip3 install *)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(rm -rf /tmp/b1_best_ckpt_smoke)",
+      "Bash(OUTPUT_ROOT=/tmp/b1_best_ckpt_smoke MODEL_NAME=google/flan-t5-small python b1_finetune.py --config ../configs/base.yaml --device cpu)",
+      "WebFetch(domain:arxiv.org)",
+      "WebSearch",
+      "Bash(git push *)"
     ]
   }
 }

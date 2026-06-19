@@ -295,20 +295,18 @@ def compute_percentile_length(
     lengths = []
     for ds in period_datasets.values():
         texts = list(ds[col])
-        # Batch tokenize with fallback for texts that cause tokenizer panics
-        # (e.g. "NormalizedString bad split" on certain Unicode chars in Rust tokenizers).
-        try:
-            enc = tokenizer(texts, truncation=True, max_length=hard_cap,
-                            padding=False, add_special_tokens=True)
-            lengths.extend(len(ids) for ids in enc["input_ids"])
-        except Exception:
-            for text in texts:
-                try:
-                    enc = tokenizer(text, truncation=True, max_length=hard_cap,
-                                    padding=False, add_special_tokens=True)
-                    lengths.append(len(enc["input_ids"]))
-                except Exception:
-                    pass
+        # Tokenize one text at a time. Batch tokenization uses Rayon (Rust
+        # thread pool) internally; a panic in any Rayon worker thread cannot
+        # be caught by Python and kills the whole process with SIGSEGV.
+        # Single-text calls stay on the Python thread and raise a normal
+        # exception that we can swallow.
+        for text in texts:
+            try:
+                enc = tokenizer(text, truncation=True, max_length=hard_cap,
+                                padding=False, add_special_tokens=True)
+                lengths.append(len(enc["input_ids"]))
+            except Exception:
+                pass
 
     p_len  = int(_np.percentile(lengths, percentile))
     rounded = ((p_len + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple

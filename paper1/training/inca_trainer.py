@@ -704,9 +704,14 @@ def train(cfg: INCAConfig, device: str,
         _amp_dev     = "cpu"
 
     # ── DataLoader worker count ────────────────────────────────────────
-    # MPS / CPU: num_workers=0 — MPS tensors can't cross process boundaries.
-    # CUDA: num_workers=4 — enables prefetch overlap, ~10-15% free throughput.
-    _dl_workers = 4 if device.startswith("cuda") else 0
+    # Always 0. On CUDA (Linux), the DataLoader is iterated once per epoch
+    # from the same loader object.  At each epoch boundary PyTorch calls
+    # iter(loader) which forks new workers via the default "fork" start
+    # method.  Fork-after-CUDA-init corrupts CUDA file descriptors in the
+    # child processes; when they exit they close /dev/nvidia*, which
+    # SIGSEGV's the parent mid-epoch-2.  The dataset is already in RAM and
+    # GPU training is the bottleneck (>20 batch/s), so workers add nothing.
+    _dl_workers = 0
 
     # ── load dataset ───────────────────────────────────────────────────
     dataset_name = getattr(cfg, "dataset", "cc_news")

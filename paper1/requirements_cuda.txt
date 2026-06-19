@@ -1,0 +1,27 @@
+# INCA + B6 Paper B — CUDA requirements
+# Install with: pip install -r requirements_cuda.txt
+#
+# PyTorch: install the CUDA wheel FIRST (before everything else) using the
+# command from https://pytorch.org/get-started/locally/
+# For CUDA 12.1:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# For CUDA 11.8:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# Then run: pip install -r requirements_cuda.txt
+
+# ── Core ML ───────────────────────────────────────────────────────────────────
+torch>=2.1.0                  # 2.1+ required for bf16 autocast stability on CUDA
+transformers>=4.37.0          # T5ForConditionalGeneration + Seq2SeqTrainer
+datasets>=2.14.0              # HuggingFace datasets (MetaMath, Evol-CodeAlpaca, …)
+accelerate>=0.26.0            # HF Trainer backend (bf16 training)
+sentencepiece>=0.1.99         # T5 tokenizer (SentencePiece model)
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+tqdm>=4.65.0
+PyYAML>=6.0
+numpy>=1.24.0
+
+# ── Optional but recommended ──────────────────────────────────────────────────
+# wandb                       # experiment tracking (uncomment if you use W&B)
+# tensorboard                 # loss curve visualisation
+# scipy                       # for any analysis scripts

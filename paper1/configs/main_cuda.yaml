@@ -1,0 +1,119 @@
+# Paper B CUDA config — INCA vs LLaMA-Pro on domain-sequential curriculum
+# Optimised for a single 24 GB CUDA GPU (RTX 3090 / 4090 / A10G / A5000 / A40).
+#
+# Differences from configs/paper_b.yaml (MPS):
+#   precision: bf16          native bf16 matmul on Ampere+; change to fp16 for Volta/Turing
+#   batch_size: 8            2× MPS (GPU can hold larger batches; same effective batch = 32)
+#   grad_accum_steps: 4      halved (8→4) to keep effective batch = 8×4 = 32
+#   gradient_checkpointing: true    recompute activations; saves ~300 MB, ~15% slower
+#   fp16: false              INCA trainer uses `precision:` not this flag; keep false
+#
+# Memory budget (FLAN-T5-large, batch_size=8, bf16):
+#   Model weights bf16:    ~1.5 GB
+#   AdamW fp32 states:     ~3.1 GB  (2 tensors per param = m + v)
+#   Gradients bf16:        ~0.75 GB
+#   Activations (GC on):   ~2.0 GB  (recomputed; only one layer held at a time)
+#   KV cache (eval):       ~1.5 GB  (max_new_tokens=256, batch=32)
+#   ─────────────────────────────────
+#   Total:                 ~9 GB  → comfortable on 24 GB
+#
+# To run (all 3 INCA seeds + 3 B6 seeds):
+#   python scripts/run_paper_b.py --config configs/paper_b_cuda.yaml
+#
+# Or individual seeds:
+#   python scripts/train_inca.py --config configs/paper_b_cuda.yaml --seed 42
+#   python scripts/train_inca.py --config configs/paper_b_cuda.yaml --seed 123
+#   python scripts/train_inca.py --config configs/paper_b_cuda.yaml --seed 999
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model_name: "google/flan-t5-base"        # 250 M encoder-decoder (12 enc + 12 dec layers)
+
+# ── Precision (CUDA) ──────────────────────────────────────────────────────────
+# bf16: preferred on all Ampere+ GPUs (RTX 3090+, A10G, A40, A100, H100).
+# Change to fp16 only for Volta/Turing (V100, T4, RTX 2080) — bf16 not supported there.
+precision: "bf16"
+fp16: false                               # INCA trainer reads `precision:`, not this flag
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+dataset:       "domain_sequential"
+n_per_period:  30000                      # 30k/period — sufficient for saturation on 250M base model
+max_periods:   4                          # P1_metamath → P2_evol_code → P3_science → P4_medical
+
+# ── Training (CUDA-optimised) ─────────────────────────────────────────────────
+lr:                  1.0e-4               # standard FLAN-T5-large AdamW LR; bf16 on CUDA is stable
+weight_decay:        0.01
+batch_size:          8                    # 2× MPS; fits in 24 GB with bf16 + GC
+epochs_per_period:   5
+warmup_steps:        200                  # warmup to 1e-4 over 200 steps
+warmup_ratio:        0.06
+grad_accum_steps:    4                    # effective batch = 8 × 4 = 32 (unchanged)
+max_grad_norm:       1.0                  # standard FLAN-T5 clipping
+gradient_checkpointing: true              # recompute activations — safe for INCA
+use_adafactor:       false
+ppl_eval_frac:       0.10
+seed:                42
+log_every_n_steps:   25
+max_input_length:    256
+max_target_length:   0                    # 0 = auto: P95 token length scanned at startup
+max_new_tokens:      512                  # full generation: covers MetaMath chain-of-thought + answer
+
+# ── INCA block-chain growth ───────────────────────────────────────────────────
+n_max_blocks:           8
+k_eval:                 50                # check every 50 steps on CUDA (30k/32=937 steps/epoch → ~18 evals/epoch)
+patience:               3
+min_epochs_before_grow: 1
+layers_per_block:       3                 # flan-t5-base: 12 enc layers → max 4 blocks
+lateral_rank:           0
+
+# ── Multi-signal consensus ────────────────────────────────────────────────────
+rir_threshold:        0.30
+rir_negligible:       0.05
+grad_norm_ema_alpha:  0.10
+grad_norm_decay_frac: 0.50
+
+# ── CKA ───────────────────────────────────────────────────────────────────────
+cka_ref_size:             100
+cka_saturation_threshold: 0.95
+
+# ── Replay ────────────────────────────────────────────────────────────────────
+buffer_max_size: 2000
+replay_ratio:    0.25
+n_revise:        3
+p_hard:          0.70
+p_easy:          0.20
+p_mid:           0.10
+
+# ── Drift & relabelling ───────────────────────────────────────────────────────
+period_drift_tol:    0.10
+min_rir_for_learned: 0.20
+
+# ── Selector ──────────────────────────────────────────────────────────────────
+selector:        "embedding_query"
+selector_heads:  4
+selector_hidden: 64
+
+uclbr_pre_gate_hidden: 64
+uclbr_heads:           4
+uclbr_bias_lr:         1.0e-3
+uclbr_top_k:           0
+
+# ── Eval speed ────────────────────────────────────────────────────────────────
+eval_batch_size:    32
+sat_eval_samples:   200
+# sat_max_new_tokens removed — saturation checks use max_new_tokens
+
+# ── Saturation timeout ────────────────────────────────────────────────────────
+# 30k/32/50 ≈ 18 evals/epoch; exclude epoch 0 → 72 remaining over epochs 1-4
+# fire at eval 50 (≈ epoch 2.8 into epochs 1-4 = epoch 3.8 absolute) → BLOCK_FULL
+patience_timeout:       50            # timeout only fires when loss is flat (new gating logic)
+loss_plateau_min_delta: 0.005         # loss range threshold for timeout gating only
+
+# ── Metric early stop (primary convergence gate) ──────────────────────────
+# Mirrors EarlyStoppingCallback: fires when F1 fails to improve by min_delta
+# for patience consecutive checks.  Replaces loss-plateau in consensus rules.
+# CUDA k_eval=50 → patience=5 means 250 steps (~0.3 epochs) without F1 gain.
+early_stop_patience:  5
+early_stop_min_delta: 0.005
+
+# ── Output ────────────────────────────────────────────────────────────────────
+out_dir: "results/paper_b"

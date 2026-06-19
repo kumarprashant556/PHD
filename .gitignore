@@ -21,9 +21,14 @@ results/
 # ── Data / cache ──────────────────────────────────────────────────────────────
 data/raw/
 data/cache/
+cache/
 *.arrow
 *.parquet
 ~/.cache/huggingface/
+
+# ── Deployment zips and unpacked CUDA run dirs ────────────────────────────────
+*.zip
+inca_cuda_run/
 
 # ── UI server logs ────────────────────────────────────────────────────────────
 *.log

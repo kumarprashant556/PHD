@@ -1,0 +1,17 @@
+# E-CLS3: replay strategy ablation
+# Runs 4 strategies × 3 seeds = 12 total runs.
+# uniform  = p_hard=0,    p_easy=0,    p_mid=1.0  (uniform across buffer)
+# hardest  = p_hard=1.0,  p_easy=0,    p_mid=0    (only highest-loss items)
+# easiest  = p_hard=0,    p_easy=1.0,  p_mid=0    (only lowest-loss items)
+# schedule = p_hard=0.70, p_easy=0.20, p_mid=0.10 (default study schedule)
+defaults:
+  - /configs/main            # Paper B dataset + scale
+
+sweep:
+  replay_strategy: [uniform, hardest, easiest, schedule]
+  seed: [42, 123, 999]
+
+dataset:      "domain_sequential"
+n_per_period: 2000
+max_periods:  3
+out_dir:      "results/paper_b/ablations/e_cls3"

@@ -1,0 +1,524 @@
+"""INCA block-chain layer manager  (Phase 1, T1.5 / Architecture).
+
+Wraps a FLAN-T5 encoder and manages the growing chain of frozen + one
+trainable INCA block.
+
+Design
+------
+A single FLAN-T5 encoder has ``n_layers`` transformer layers.  INCA
+partitions those layers into contiguous *blocks* of ``layers_per_block``
+layers each.  When a block saturates:
+
+  1. The current (trainable) block is frozen in place.
+  2. Its weights are deep-copied to form a new trainable block (warm-start).
+  3. A CrossAttentionSelector weight is added for the new block.
+  4. The model grows until ``n_max_blocks`` is reached (then RuntimeError).
+
+Forward pass
+------------
+Every block receives the same encoder input (the embedding + position
+encoding from the *base* encoder).  Their hidden-state outputs are
+aggregated by the CrossAttentionSelector into one (B, S, D) tensor that
+the T5 decoder attends to.
+
+The base model's own ``forward`` is not called end-to-end; instead:
+
+  * Token + position embeddings are extracted via ``_embed()``.
+  * Each block runs its layers sequentially over those embeddings.
+  * All blocks are called even for inference so the selector can weight
+    them correctly.
+  * Frozen blocks run under ``torch.no_grad()`` for efficiency.
+
+Param groups
+------------
+``trainable_params()`` returns only the current (last) block's parameters
+plus the selector gate, making it trivial to pass to an optimiser without
+accidentally unfreezing history.
+
+``grad_norm()`` computes the L2 norm of those same trainable parameters'
+gradients (used by GradNormTracker in inca_plateau.py).
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+from typing import Dict, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+
+from .selectors import CrossAttentionSelector, EmbeddingQuerySelector, WeightedSumSelector
+from .uclbr import UCLBRSelector
+
+# All selector variants available from day one for E-ROUTE ablation.
+# Switch via cfg.selector in YAML.
+_SELECTOR_CLS = {
+    "embedding_query": EmbeddingQuerySelector,   # S-QKV  — recommended default
+    "uclbr":           UCLBRSelector,            # UCLBR  — full three-component router
+    "cross_attention": CrossAttentionSelector,   # S-FULL — MLP-gate sequence-level
+    "weighted_sum":    WeightedSumSelector,      # S-WS   — blind scalar control
+}
+_DEFAULT_SELECTOR = "embedding_query"
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _freeze(module: nn.Module) -> None:
+    """Set all parameters of *module* to requires_grad=False."""
+    for p in module.parameters():
+        p.requires_grad_(False)
+
+
+def _unfreeze(module: nn.Module) -> None:
+    """Set all parameters of *module* to requires_grad=True."""
+    for p in module.parameters():
+        p.requires_grad_(True)
+
+
+def _zero_output_projs(block: nn.Module) -> None:
+    """G-VERT: zero attention and FFN output projections → function-preserving identity init.
+
+    With T5 residual connections, zeroing these projections means the new block
+    passes its input through unchanged at initialisation (function-preserving depth growth).
+    """
+    for layer in block.layers:
+        layer.layer[0].SelfAttention.o.weight.data.zero_()
+        layer.layer[1].DenseReluDense.wo.weight.data.zero_()
+
+
+@torch.no_grad()
+def _net2net_expand_ffn(block: nn.Module, delta_w: int) -> None:
+    """G-HORIZ: Net2Net function-preserving FFN width expansion.
+
+    Expands the gated FFN of every layer in *block* from d_ff → d_ff + delta_w
+    by duplicating randomly-chosen source neurons and halving both the source
+    and its duplicate's output weights, preserving the function at init.
+
+    T5v1.1 gated FFN:  y = wo @ (wi_0(x) ⊙ gelu(wi_1(x)))
+      wi_0, wi_1 : (d_ff, d_model) — expand rows
+      wo         : (d_model, d_ff) — expand cols + halve duplicated pairs
+    """
+    for layer in block.layers:
+        drd     = layer.layer[1].DenseReluDense
+        wi0, wi1, wo = drd.wi_0, drd.wi_1, drd.wo
+
+        d_ff    = wi0.weight.shape[0]
+        d_model = wi0.weight.shape[1]
+        device  = wi0.weight.device
+        dtype   = wi0.weight.dtype
+
+        # Unique source neurons (delta_w < d_ff for standard T5-large)
+        eff_dw  = min(delta_w, d_ff)
+        src_idx = torch.randperm(d_ff, device=device)[:eff_dw]
+        new_d_ff = d_ff + eff_dw
+
+        # Expand wi_0 and wi_1 — duplicate rows, output unchanged
+        new_wi0_w = torch.cat([wi0.weight.data, wi0.weight.data[src_idx]], dim=0)
+        new_wi1_w = torch.cat([wi1.weight.data, wi1.weight.data[src_idx]], dim=0)
+
+        # Expand wo — halve original source cols, halved duplicate cols appended
+        new_wo_w = wo.weight.data.clone()
+        dup_cols = wo.weight.data[:, src_idx].clone() * 0.5
+        new_wo_w[:, src_idx] *= 0.5
+        new_wo_w = torch.cat([new_wo_w, dup_cols], dim=1)
+
+        # Swap out Linear modules
+        drd.wi_0 = nn.Linear(d_model, new_d_ff, bias=False).to(device=device, dtype=dtype)
+        drd.wi_0.weight.data.copy_(new_wi0_w)
+        drd.wi_1 = nn.Linear(d_model, new_d_ff, bias=False).to(device=device, dtype=dtype)
+        drd.wi_1.weight.data.copy_(new_wi1_w)
+        drd.wo   = nn.Linear(new_d_ff, d_model, bias=False).to(device=device, dtype=dtype)
+        drd.wo.weight.data.copy_(new_wo_w)
+
+
+# ── block wrapper ─────────────────────────────────────────────────────────────
+
+class INCАBlock(nn.Module):
+    """A slice of encoder transformer layers treated as a single INCA block.
+
+    Parameters
+    ----------
+    layers : nn.ModuleList
+        The ``layers_per_block`` encoder transformer layers belonging to
+        this block.  Cloned from the base model; this module *owns* them.
+    """
+
+    def __init__(self, layers: nn.ModuleList) -> None:
+        super().__init__()
+        self.layers = layers
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run all layers in sequence.  Returns final hidden states (B, S, D)."""
+        seq_len = hidden_states.shape[1]
+
+        extended_mask: Optional[torch.Tensor] = None
+        if attention_mask is not None:
+            # T5-style: 0 → attend, large negative → mask
+            extended_mask = (1.0 - attention_mask[:, None, None, :].float()) * -1e9
+
+        # Newer transformers T5Attention requires cache_position to derive
+        # real_seq_length; pass a plain arange so it never falls back to None.
+        cache_position = torch.arange(seq_len, device=hidden_states.device)
+
+        for layer in self.layers:
+            layer_out = layer(
+                hidden_states,
+                attention_mask=extended_mask,
+                cache_position=cache_position,
+            )
+            # T5 layers return a tuple; first element is the new hidden state
+            hidden_states = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+
+        return hidden_states
+
+
+# ── main manager ─────────────────────────────────────────────────────────────
+
+class INCALayerManager(nn.Module):
+    """Growing block-chain encoder manager.
+
+    Parameters
+    ----------
+    base_model : transformers T5ForConditionalGeneration
+        The full T5 model.  The manager extracts the encoder's embedding
+        layer and transformer blocks; the decoder is left untouched.
+    cfg : INCAConfig
+        INCA configuration (layers_per_block, n_max_blocks, selector_hidden).
+    """
+
+    def __init__(self, base_model, cfg) -> None:
+        super().__init__()
+
+        self.cfg = cfg
+        self._base_model = base_model          # kept for decoder + lm-head
+        encoder = base_model.encoder           # T5Stack
+
+        # ── embedding layers (shared, frozen after init) ──────────────
+        self.embed_tokens = encoder.embed_tokens
+        # T5 has a final layer-norm on the encoder stack
+        self.final_layer_norm = encoder.final_layer_norm
+
+        # ── slice encoder layers into the first block ──────────────────
+        all_layers = list(encoder.block)        # list[T5Block]
+        lim = cfg.layers_per_block
+        first_block_layers = nn.ModuleList(copy.deepcopy(all_layers[:lim]))
+        first_block = INCАBlock(first_block_layers)
+
+        self.blocks: nn.ModuleList = nn.ModuleList([first_block])
+
+        # ── lateral adapters (Phase 2 / E-SCOPE ablation) ─────────────
+        # When lateral_rank > 0, a LateralAdapter is created at each
+        # grow event to blend the frozen predecessor block's output into
+        # the new trainable block's input via a low-rank residual path.
+        # lateral_rank = 0 (default) → no adapters; identical to Phase 1.
+        self.lateral_rank: int = getattr(cfg, "lateral_rank", 0)
+        self.lateral_adapters: nn.ModuleList = nn.ModuleList()
+
+        # ── selector ──────────────────────────────────────────────────
+        # Chosen via cfg.selector (default: "embedding_query").
+        # "embedding_query" — EmbeddingQuerySelector (S-QKV):
+        #     Q = frozen original embeddings; K,V from block outputs.
+        #     Token-level selection; blocks compete to best reconstruct
+        #     the original input meaning.
+        # "cross_attention" — CrossAttentionSelector (S-FULL):
+        #     MLP gate on mean-pooled block outputs; sequence-level.
+        # "weighted_sum"    — WeightedSumSelector (S-WS):
+        #     Input-independent scalar weight per block; control ablation.
+        hidden_size = base_model.config.d_model
+        self.d_model = hidden_size
+        selector_name = getattr(cfg, "selector", _DEFAULT_SELECTOR)
+        sel_cls = _SELECTOR_CLS.get(selector_name)
+        if sel_cls is None:
+            raise ValueError(
+                f"Unknown selector '{selector_name}'. "
+                f"Choose from: {list(_SELECTOR_CLS)}"
+            )
+        if selector_name == "embedding_query":
+            self.selector = EmbeddingQuerySelector(
+                hidden_size=hidden_size,
+                n_heads=getattr(cfg, "selector_heads", 4),
+            )
+        elif selector_name == "uclbr":
+            self.selector = UCLBRSelector(
+                hidden_size=hidden_size,
+                pre_gate_hidden=getattr(cfg, "uclbr_pre_gate_hidden", 64),
+                n_heads=getattr(cfg, "uclbr_heads", 4),
+                bias_lr=getattr(cfg, "uclbr_bias_lr", 1e-3),
+                top_k=getattr(cfg, "uclbr_top_k", 0),
+            )
+        elif selector_name == "cross_attention":
+            self.selector = CrossAttentionSelector(
+                hidden_size=hidden_size,
+                gate_hidden=cfg.selector_hidden,
+            )
+        else:  # weighted_sum
+            self.selector = WeightedSumSelector(n_blocks_init=1)
+
+        # ── inter-block projections (architecture (a) from memorandum) ─
+        # One projection per transition: proj[i] maps Block-i output →
+        # Block-(i+1) input.  Identity-initialised so the architecture is
+        # function-preserving at grow time.  Added/frozen together with
+        # the corresponding source block.
+        # At init only one block exists so no projections yet.
+        self.inter_block_projs: nn.ModuleList = nn.ModuleList()
+
+        # ── dropout from base encoder (reuse rate) ─────────────────────
+        dropout_rate = getattr(base_model.config, "dropout_rate", 0.1)
+        self.dropout = nn.Dropout(p=dropout_rate)
+
+        # ── freeze everything except the current (last) block ──────────
+        _freeze(self.embed_tokens)
+        _freeze(self.final_layer_norm)
+        # First block starts trainable; selector always trainable
+
+    # ── properties ────────────────────────────────────────────────────
+
+    @property
+    def n_blocks(self) -> int:
+        return len(self.blocks)
+
+    @property
+    def current_block(self) -> INCАBlock:
+        return self.blocks[-1]  # type: ignore[return-value]
+
+    # ── grow ──────────────────────────────────────────────────────────
+
+    def freeze_and_grow(self) -> None:
+        """Grow the model according to cfg.growth_primitive.
+
+        Primitives
+        ----------
+        "expert"  G-EXPERT (default): freeze current block, deepcopy → warm-started new block.
+        "vert"    G-VERT: same as expert but zero attention + FFN output projs → identity init.
+        "horiz"   G-HORIZ: Net2Net FFN width expansion in-place; no new block, no freeze.
+
+        Raises
+        ------
+        RuntimeError
+            If ``n_max_blocks`` would be exceeded (not raised for G-HORIZ).
+        """
+        primitive = getattr(self.cfg, "growth_primitive", "expert")
+
+        # ── G-HORIZ: expand in-place, no new block ──────────────────────
+        if primitive == "horiz":
+            delta_w = getattr(self.cfg, "horiz_delta_w", 512)
+            _net2net_expand_ffn(self.current_block, delta_w)
+            # Optimizer will be rebuilt by the trainer; no selector/block update needed.
+            return
+
+        # ── G-EXPERT / G-VERT: freeze current block, append new one ─────
+        if self.n_blocks >= self.cfg.n_max_blocks:
+            raise RuntimeError(
+                f"INCA: n_max_blocks={self.cfg.n_max_blocks} reached — "
+                "cannot grow further.  Increase n_max_blocks or stop training."
+            )
+
+        # Determine the device from the current block's parameters so that
+        # all newly-created modules are placed on the same device.
+        # (nn.Linear / LateralAdapter default to CPU; on MPS or CUDA that
+        # causes a cross-device tensor error on the first forward pass.)
+        try:
+            _device = next(self.current_block.parameters()).device
+        except StopIteration:
+            _device = torch.device("cpu")
+
+        # 1. Freeze current block (and its incoming lateral adapter, if any)
+        _freeze(self.current_block)
+        if self.lateral_adapters:
+            _freeze(self.lateral_adapters[-1])
+
+        # 2. Add identity-initialised inter-block projection for this
+        #    transition and freeze it together with the source block.
+        proj = nn.Linear(self.d_model, self.d_model, bias=False).to(_device)
+        nn.init.eye_(proj.weight)
+        _freeze(proj)
+        self.inter_block_projs.append(proj)
+
+        # 3. Create new block via selected primitive.
+        new_block = copy.deepcopy(self.current_block)
+        if primitive == "vert":
+            _zero_output_projs(new_block)   # function-preserving identity init
+        # "expert" and anything else: warm-start from deepcopy (no further change)
+        _unfreeze(new_block)
+        self.blocks.append(new_block)
+
+        # 4. Notify the selector that another block has been added.
+        #    WeightedSumSelector keeps a fixed Parameter vector per block.
+        if hasattr(self.selector, "grow"):
+            self.selector.grow()
+
+        # 5. Lateral adapter (E-SCOPE / Phase 2).
+        if self.lateral_rank > 0:
+            from .lateral import LateralAdapter
+            self.lateral_adapters.append(
+                LateralAdapter(self.d_model, rank=self.lateral_rank).to(_device)
+            )
+
+    # ── forward ───────────────────────────────────────────────────────
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Encode input_ids through all blocks; return selector-aggregated (B, S, D).
+
+        Frozen blocks run under ``torch.no_grad()`` for memory efficiency.
+        The current (last) block always runs with gradients.
+        """
+        # Shared token embeddings (frozen)
+        with torch.no_grad():
+            hidden = self.embed_tokens(input_ids)
+            hidden = self.dropout(hidden)
+
+        block_outputs: List[torch.Tensor] = []
+        # Architecture (a): sequential chain + original-embedding skip.
+        # chain_hidden is threaded through blocks sequentially.
+        # At each transition: chain_hidden = proj_i(chain_hidden) + embedding_hidden
+        # so the original token embeddings act as a persistent residual skip
+        # that prevents representation drift through deep frozen chains.
+        embedding_hidden = hidden    # (B, S, D) — kept for skip connections
+        chain_hidden = hidden        # starts as plain embeddings (Block 0 input)
+
+        for i, block in enumerate(self.blocks):
+            is_current = (i == len(self.blocks) - 1)
+
+            # ── inter-block projection + embedding skip ────────────────
+            # proj[i-1] maps Block-(i-1) output into Block-i's input space.
+            # Adding embedding_hidden gives the block a direct path back to
+            # the original token representations regardless of chain depth.
+            if i > 0:
+                # Capture the raw frozen-block output BEFORE the projection
+                # so the lateral adapter can use it as its frozen_out signal.
+                prev_chain = chain_hidden
+
+                proj = self.inter_block_projs[i - 1]
+                if is_current:
+                    chain_hidden = proj(chain_hidden) + embedding_hidden
+                else:
+                    with torch.no_grad():
+                        chain_hidden = proj(chain_hidden) + embedding_hidden
+
+                # ── lateral adapter (E-SCOPE / Phase 2) ───────────────
+                # adapter[i-1] blends prev block's raw output (prev_chain)
+                # into the new block's prepared input (chain_hidden).
+                # Only runs if lateral_rank > 0 and adapter exists.
+                lat_idx = i - 1
+                if lat_idx < len(self.lateral_adapters):
+                    lat = self.lateral_adapters[lat_idx]
+                    if is_current:
+                        chain_hidden = lat(chain_hidden, prev_chain)
+                    else:
+                        with torch.no_grad():
+                            chain_hidden = lat(chain_hidden, prev_chain)
+
+            # ── block forward ──────────────────────────────────────────
+            if is_current:
+                h = block(chain_hidden, attention_mask=attention_mask)
+                h = self.final_layer_norm(h)
+                h = self.dropout(h)
+            else:
+                with torch.no_grad():
+                    h = block(chain_hidden, attention_mask=attention_mask)
+                    h = self.final_layer_norm(h)
+                    h = self.dropout(h)
+
+            chain_hidden = h          # pass to next block in chain
+            block_outputs.append(h)
+
+        # Aggregate via selector.
+        # EmbeddingQuerySelector needs embedding_hidden as the fixed Q.
+        # CrossAttentionSelector and WeightedSumSelector ignore it.
+        combined = self.selector(
+            block_outputs,
+            attention_mask=attention_mask,
+            embedding_hidden=embedding_hidden,   # original frozen embeddings
+        )
+        return combined  # (B, S, D)
+
+    # ── parameter utilities ───────────────────────────────────────────
+
+    def trainable_params(self) -> List[nn.Parameter]:
+        """Return parameters that should be passed to the optimiser.
+
+        Includes: current block + selector gate + incoming inter-block
+        projection (if one exists).  The incoming projection was frozen
+        together with its source block; we unfreeze it here so the current
+        trainable block can learn how to use the frozen block's output.
+        """
+        params: List[nn.Parameter] = []
+        params.extend(p for p in self.current_block.parameters() if p.requires_grad)
+        params.extend(p for p in self.selector.parameters() if p.requires_grad)
+        # The projection feeding into the current block (index n_blocks-2)
+        # should be trainable so it can optimise the inter-block knowledge
+        # transfer for the current period.
+        if self.inter_block_projs:
+            incoming_proj = self.inter_block_projs[-1]
+            _unfreeze(incoming_proj)
+            params.extend(p for p in incoming_proj.parameters() if p.requires_grad)
+        # The latest lateral adapter (E-SCOPE) mediates the transition into
+        # the current block and is trainable together with it.  Earlier
+        # adapters are frozen with their source blocks.
+        if self.lateral_adapters:
+            params.extend(p for p in self.lateral_adapters[-1].parameters()
+                          if p.requires_grad)
+        return params
+
+    @torch.no_grad()
+    def grad_norm(self) -> float:
+        """L2 norm of gradients over trainable parameters.
+
+        Returns 0.0 if no gradients have been computed yet.
+        """
+        norms = [
+            p.grad.detach().norm(2).item()
+            for p in self.trainable_params()
+            if p.grad is not None
+        ]
+        if not norms:
+            return 0.0
+        total = math.sqrt(sum(n ** 2 for n in norms))
+        return total
+
+    # ── state for checkpointing ───────────────────────────────────────
+
+    def manager_state(self) -> dict:
+        """Return a lightweight state dict for saving/restoring INCA growth state."""
+        return {
+            "n_blocks": self.n_blocks,
+            "blocks_state": [b.state_dict() for b in self.blocks],
+            "selector_state": self.selector.state_dict(),
+            "proj_states": [p.state_dict() for p in self.inter_block_projs],
+            # Lateral adapters (E-SCOPE / Phase 2); empty list when lateral_rank=0.
+            "lateral_states": [l.state_dict() for l in self.lateral_adapters],
+        }
+
+    def load_manager_state(self, state: dict) -> None:
+        """Restore block chain from a previously saved ``manager_state()``."""
+        saved_n = state["n_blocks"]
+        # Grow to match saved block count
+        while self.n_blocks < saved_n:
+            self.freeze_and_grow()
+        # Load block weights
+        for i, (block, sd) in enumerate(zip(self.blocks, state["blocks_state"])):
+            block.load_state_dict(sd)
+            if i < saved_n - 1:
+                _freeze(block)
+            else:
+                _unfreeze(block)
+        self.selector.load_state_dict(state["selector_state"])
+        # Load projection weights (backwards-compatible: key may not exist in
+        # old checkpoints that used the parallel architecture)
+        for proj, sd in zip(self.inter_block_projs,
+                            state.get("proj_states", [])):
+            proj.load_state_dict(sd)
+        # Restore lateral adapter weights (backwards-compatible: absent in
+        # Phase 1 / lateral_rank=0 checkpoints).
+        for lat, lat_sd in zip(self.lateral_adapters,
+                               state.get("lateral_states", [])):
+            lat.load_state_dict(lat_sd)

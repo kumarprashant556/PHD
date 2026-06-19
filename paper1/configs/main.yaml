@@ -1,0 +1,114 @@
+# Paper B primary training config — INCA vs LLaMA-Pro on domain-sequential curriculum
+# Inherits the INCA architecture spec from configs/inca.yaml; overrides dataset + scale.
+#
+# Dataset: 4 domains (MetaMath → Evol-CodeAlpaca → science → medical)
+# P1 and P2 use the SAME datasets as LLaMA-Pro's SFT stage (Wu et al., 2024) for a
+# dataset-controlled comparison: same training data, different expansion strategy.
+#
+#   P1_metamath   meta-math/MetaMathQA                  ~395 000 examples → subsampled to n_per_period
+#   P2_evol_code  theblackcat102/evol-codealpaca-v1      ~111 272 examples → subsampled to n_per_period
+#   P3_science    allenai/sciq                           ~13 700  examples → subsampled to n_per_period
+#   P4_medical    openlifescienceai/medmcqa              ~182 000 examples → subsampled to n_per_period
+#
+# Metric: token-level F1 (SQuAD-style) — unified across all 4 domains.
+#   LLaMA-Pro uses pass@1 (code) and exact-match (math) — binary metrics that kill the
+#   saturation detector (RIR=0 early → only EXHAUSTED fires).  F1 gives partial credit
+#   for correct reasoning steps and final answers, enabling smooth RIR → BLOCK_FULL.
+#   Framing: always explicitly labelled as "token F1" in tables (not "accuracy").
+#
+# Parameter comparison tracked by training/memory_tracker.py → param_comparison_table():
+#   LLaMA-Pro:  ~6 738M → ~8 303M  (+1 565M, +23.2%)  fixed schedule, all blocks at once
+#   INCA:       ~783M   → adaptive  (+0–300M, 0–38%)   saturation-driven, per-run variability
+#
+# Usage:
+#   python scripts/train_inca.py    --config configs/paper_b.yaml
+#   python baselines/b6_llama_pro.py --config configs/baselines/b6_paper_b.yaml
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model_name: "google/flan-t5-base"        # 250 M encoder-decoder (12 enc + 12 dec layers)
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+dataset:       "domain_sequential"        # data/domain_sequential.py
+n_per_period:  30000                      # 30k/period — sufficient for saturation on 250M base model
+max_periods:   4                          # P1_metamath → P2_evol_code → P3_science → P4_medical
+
+# ── Training ──────────────────────────────────────────────────────────────────
+lr:                  1.0e-4               # fp32 MPS stable at 1e-4; fp16 autocast (NaN source) is now disabled
+weight_decay:        0.01
+batch_size:          4                    # MPS-safe; effective batch = 4 × 8 = 32
+epochs_per_period:   5                    # 5 epochs: model converges/plateaus on 30k samples
+warmup_steps:        200                  # warmup to 1e-4 over 200 steps
+warmup_ratio:        0.06
+grad_accum_steps:    8                    # increased to maintain effective batch = 32
+max_grad_norm:       1.0                  # standard FLAN-T5 clipping; fp16 NaN (former instability root cause) is fixed
+gradient_checkpointing: false
+use_adafactor:       false
+ppl_eval_frac:       0.10                 # larger eval fraction (small dataset)
+seed:                42
+fp16:                false
+log_every_n_steps:   25
+max_input_length:    256
+max_target_length:   0                    # 0 = auto: P95 token length scanned from data at startup
+max_new_tokens:      512                  # full generation: covers MetaMath chain-of-thought + answer
+
+# ── INCA block-chain growth ───────────────────────────────────────────────────
+n_max_blocks:           8
+k_eval:                 200               # check every 200 steps on MPS (30k/32=937 steps/epoch → ~4 evals/epoch)
+patience:               3                 # consecutive evals for loss plateau window
+min_epochs_before_grow: 1                 # allow growth after 1 epoch (small domain)
+layers_per_block:       3                 # flan-t5-base: 12 enc layers → max 4 blocks
+lateral_rank:           0                 # Phase 1 (no lateral adapters in main paper)
+
+# ── Multi-signal consensus ────────────────────────────────────────────────────
+rir_threshold:        0.30
+rir_negligible:       0.05
+grad_norm_ema_alpha:  0.10
+grad_norm_decay_frac: 0.50
+
+# ── CKA ───────────────────────────────────────────────────────────────────────
+cka_ref_size:             100             # ≥5% of sat_eval_samples
+cka_saturation_threshold: 0.95
+
+# ── Replay ────────────────────────────────────────────────────────────────────
+buffer_max_size: 2000                     # ~7% of n_per_period (30k)
+replay_ratio:    0.25
+n_revise:        3
+p_hard:          0.70
+p_easy:          0.20
+p_mid:           0.10
+
+# ── Drift & relabelling ───────────────────────────────────────────────────────
+period_drift_tol:    0.10
+min_rir_for_learned: 0.20
+
+# ── Selector (default: S-QKV; overridden by E-ROUTE ablation) ─────────────────
+selector:        "embedding_query"
+selector_heads:  4
+selector_hidden: 64
+
+uclbr_pre_gate_hidden: 64
+uclbr_heads:           4
+uclbr_bias_lr:         1.0e-3
+uclbr_top_k:           0
+
+# ── Eval speed ────────────────────────────────────────────────────────────────
+eval_batch_size:    32
+sat_eval_samples:   100               # MPS: keep eval fast (200 on CUDA)
+# sat_max_new_tokens removed — saturation checks use max_new_tokens
+
+# ── Saturation timeout ────────────────────────────────────────────────────────
+# patience_timeout: eval checks before timeout fires (→ BLOCK_FULL if RIR high)
+# 30k/32/200 ≈ 4 evals/epoch; exclude epoch 0 → 16 remaining over epochs 1-4
+# fire at eval 12 (≈ epoch 4 of 5) so model trains nearly to completion first
+patience_timeout:       12            # timeout only fires when loss is flat (new gating logic)
+loss_plateau_min_delta: 0.005         # loss range threshold for timeout gating only
+
+# ── Metric early stop (primary convergence gate) ──────────────────────────
+# Mirrors EarlyStoppingCallback: fires when F1 fails to improve by min_delta
+# for patience consecutive checks.  Replaces loss-plateau in consensus rules.
+# MPS k_eval=200 → patience=4 means ~800 steps (~1 epoch) without F1 gain.
+early_stop_patience:  4
+early_stop_min_delta: 0.005
+
+# ── Output ────────────────────────────────────────────────────────────────────
+out_dir: "results/paper_b"

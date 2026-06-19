@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-worker-pod
+  labels:
+    app: gpu-worker
+spec:
+  containers:
+  - name: gpu-worker-container
+    image: nishant556/gpu-worker:v1
+    imagePullPolicy: Always
+    command: ["/bin/bash", "-c", "sleep infinity"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1 # Requests 1 GPU
+  restartPolicy: Never

@@ -1,0 +1,44 @@
+# E-PRIM: growth primitive ablation  (Paper B)
+#
+# Tests the effect of the block-growth initialisation strategy on downstream
+# accuracy and forward-transfer across the 4-domain sequential curriculum.
+#
+# Sweep: growth_primitive ∈ [expert, vert, horiz] × 3 seeds = 9 runs.
+# G-LAT (lateral adapters) is already swept separately in e_scope.yaml.
+#
+# Primitives
+# ----------
+# "expert"  G-EXPERT (Paper B default)
+#   Deepcopy the frozen block → new trainable block inherits all learned weights.
+#   Fast warm-start; risk of backward interference from prior-period patterns.
+#
+# "vert"    G-VERT
+#   Deepcopy + zero attention output (SelfAttention.o) and FFN output (wo).
+#   Combined with T5 residual connections, the new block is initially identity:
+#   f(x) = x.  Provably function-preserving at attach; learns from scratch.
+#
+# "horiz"   G-HORIZ
+#   Net2Net FFN width expansion in-place (d_ff → d_ff + horiz_delta_w = 512).
+#   No new block is added; the current block's capacity is widened.
+#   Function-preserving: source neuron and its duplicate share the output weight
+#   equally (both scaled ×0.5 at grow time).
+#
+# Expected: G-VERT may show better plasticity on later domains.
+#           G-HORIZ saturates faster (no depth growth) but may outperform on early domains.
+#           G-EXPERT should be strongest overall (warm-start advantage).
+# Paper treatment: Table 3 in Paper B (growth primitive ablation).
+#
+# Status: ✅  layer_manager.py implements all three; config fields in config.py.
+
+defaults:
+  - /configs/main            # Paper B dataset + scale (30K per period, 5 epochs)
+
+sweep:
+  growth_primitive: [expert, vert, horiz]
+  seed:             [42, 123, 999]
+
+dataset:      "domain_sequential"
+horiz_delta_w: 512              # G-HORIZ: neurons added to d_ff per grow event
+lateral_rank:  0                # hold lateral adapters off; isolate primitive effect
+selector:      "embedding_query"
+out_dir:       "results/paper_b/ablations/e_prim"

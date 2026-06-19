@@ -1,6 +1,11 @@
 > **ARCHIVED 2026-06-16** — Superseded by [`docs/dataset_strategy_FINAL.md`](../dataset_strategy_FINAL.md),
 > which merges this engineering-schema document with the gap analysis and research report.
 > Retained here as evidence/background only. Do not edit.
+>
+> **SCOPE: TEMPORAL PAPERS ONLY (Paper A / C / D) — 2026-06-17**
+> This document concerns temporal-stream datasets (CC-News, TiC-LM, FineWeb, DailyMed).
+> It is **not applicable to Paper B** (domain-sequential, non-temporal curriculum).
+> Hold until Paper A / C / D dataset work resumes. Do not pull into Paper B discussions.
 
 # CAPSEL/INCA Dataset Strategy Report
 

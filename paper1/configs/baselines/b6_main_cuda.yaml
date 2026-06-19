@@ -1,0 +1,87 @@
+# B6 LLaMA-Pro baseline — CUDA config for 24 GB GPU
+# Mirrors configs/paper_b_cuda.yaml for apples-to-apples comparison.
+#
+# Differences from configs/baselines/b6_paper_b.yaml (MPS):
+#   precision: bf16           HF Trainer → bf16=True + bf16_full_eval=True
+#   batch_size: 8             2× MPS; effective batch = 32 unchanged
+#   grad_accum_steps: 4       halved (8→4)
+#   gradient_checkpointing: false   MUST stay false — B6 freezes all-but-one
+#                             block; GC + frozen params breaks HF Trainer backward
+#
+# Memory budget (FLAN-T5-large, batch_size=8, bf16):
+#   Model bf16:          ~1.5 GB  (expands +0.2 GB per period as blocks are added)
+#   AdamW fp32 states:   ~3.1 GB  (only trainable block's params; ~40–50M params)
+#   Gradients bf16:      ~0.75 GB
+#   Activations:         ~2.0 GB  (GC off; one forward pass stored)
+#   ─────────────────────────────
+#   Total:               ~8 GB  → comfortable on 24 GB
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model_name:  "google/flan-t5-large"
+
+# ── Precision (CUDA) ──────────────────────────────────────────────────────────
+# build_training_args() in baselines/_runtime/trainer_factory.py reads `precision`
+# and sets bf16=True / bf16_full_eval=True in Seq2SeqTrainingArguments.
+# For Volta/Turing (V100, T4, RTX 2080): change to precision: "fp16"
+precision: "bf16"
+fp16: false                               # kept for INCAConfig compat; trainer uses precision:
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+dataset:       "domain_sequential"
+n_per_period:  30000                      # must match INCA configs for apples-to-apples comparison
+max_periods:   4                          # P1_metamath → P2_evol_code → P3_science → P4_medical
+
+# ── Training (CUDA-optimised) ─────────────────────────────────────────────────
+lr:                  1.0e-4               # standard FLAN-T5-large AdamW LR; bf16 on CUDA is stable
+weight_decay:        0.01
+batch_size:          8
+epochs_per_period:   5
+warmup_steps:        200                  # warmup to 1e-4 over 200 steps
+warmup_ratio:        0.06
+grad_accum_steps:    4                    # effective batch = 8 × 4 = 32
+max_grad_norm:       1.0                  # standard FLAN-T5 clipping
+gradient_checkpointing: false             # MUST be false for B6 (frozen blocks + GC = broken)
+use_adafactor:       false
+ppl_eval_frac:       0.10
+seed:                42
+log_every_n_steps:   25
+max_input_length:    256
+max_target_length:   0
+max_new_tokens:      512                  # full generation: covers MetaMath chain-of-thought + answer
+
+# ── B6-specific ───────────────────────────────────────────────────────────────
+n_max_blocks:           8
+k_eval:                 25
+patience:               3
+min_epochs_before_grow: 1
+layers_per_block:       4
+lateral_rank:           0
+rir_threshold:          0.30
+rir_negligible:         0.05
+grad_norm_ema_alpha:    0.10
+grad_norm_decay_frac:   0.50
+cka_ref_size:           100
+cka_saturation_threshold: 0.95
+buffer_max_size:        2000
+replay_ratio:           0.25
+n_revise:               3
+p_hard:                 0.70
+p_easy:                 0.20
+p_mid:                  0.10
+period_drift_tol:       0.10
+min_rir_for_learned:    0.20
+selector:               "embedding_query"
+selector_heads:         4
+selector_hidden:        64
+uclbr_pre_gate_hidden:  64
+uclbr_heads:            4
+uclbr_bias_lr:          1.0e-3
+uclbr_top_k:            0
+
+# ── Eval speed ────────────────────────────────────────────────────────────────
+eval_batch_size:    32
+sat_eval_samples:   200
+# sat_max_new_tokens removed — saturation checks now use max_new_tokens
+
+# ── Output ────────────────────────────────────────────────────────────────────
+out_dir: "results/paper_b/b6"

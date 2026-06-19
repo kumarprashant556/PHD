@@ -35,7 +35,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from datasets import Dataset
-from transformers import AutoTokenizer, T5ForConditionalGeneration, GenerationConfig
+from transformers import AutoTokenizer, T5ForConditionalGeneration
 from transformers import DataCollatorForSeq2Seq
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.optimization import Adafactor, get_cosine_schedule_with_warmup
@@ -322,6 +322,57 @@ def _answer_exact_match(pred: str, gold: str) -> float:
 # ──────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
+def _greedy_decode(
+    model:     "T5ForConditionalGeneration",
+    enc_hidden: torch.Tensor,
+    attn_mask:  torch.Tensor,
+    max_new_tokens: int,
+    device: str,
+) -> torch.Tensor:
+    """Greedy T5 decode calling model.decoder directly with return_dict=False.
+
+    Bypasses model.generate() which internally creates Seq2SeqLMOutput via
+    transformers' _sample code-path.  On Python 3.12 + certain transformers
+    versions, Seq2SeqLMOutput.__setattr__ raises TypeError due to a
+    ModelOutput / OrderedDict incompatibility.  Calling model.decoder with
+    return_dict=False returns a plain tuple — no ModelOutput is ever created.
+    """
+    batch     = enc_hidden.shape[0]
+    dec_start = model.config.decoder_start_token_id
+    eos_id    = model.config.eos_token_id or 1
+    # T5 scales decoder hidden state before lm_head when tie_word_embeddings=True
+    scale     = model.model_dim ** -0.5 if model.config.tie_word_embeddings else 1.0
+
+    dec_ids   = torch.full((batch, 1), dec_start, dtype=torch.long, device=device)
+    generated = dec_ids.clone()
+    past_kv   = None
+    done      = torch.zeros(batch, dtype=torch.bool, device=device)
+
+    for _ in range(max_new_tokens):
+        dec_out = model.decoder(
+            input_ids=dec_ids,
+            encoder_hidden_states=enc_hidden,
+            encoder_attention_mask=attn_mask,
+            past_key_values=past_kv,
+            use_cache=True,
+            return_dict=False,          # plain tuple → no ModelOutput creation
+        )
+        hidden  = dec_out[0]            # [batch, 1, d_model]
+        past_kv = dec_out[1]            # nested tuple of KV tensors
+
+        logits   = model.lm_head(hidden[:, -1:, :] * scale)   # [batch, 1, vocab]
+        next_tok = logits.squeeze(1).argmax(-1, keepdim=True)  # [batch, 1]
+
+        generated = torch.cat([generated, next_tok], dim=1)
+        done     |= next_tok.squeeze(-1) == eos_id
+        if done.all():
+            break
+        dec_ids = next_tok
+
+    return generated
+
+
+@torch.no_grad()
 def _eval_accuracy(
     model: T5ForConditionalGeneration,
     manager: INCALayerManager,
@@ -381,20 +432,12 @@ def _eval_accuracy(
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
             )
-            enc_out = BaseModelOutput(last_hidden_state=enc_hidden)
-
-            gen_ids = model.generate(
-                encoder_outputs=enc_out,
-                attention_mask=inputs["attention_mask"],
-                generation_config=GenerationConfig(max_new_tokens=max_new_tokens),
+            gen_ids = _greedy_decode(
+                model, enc_hidden, inputs["attention_mask"], max_new_tokens, device
             )
         preds = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        # Release KV-cache tensors from model.generate() before the next batch.
-        # On MPS, generation allocates ~1–2 GB of KV-cache per batch that stays
-        # "allocated" (not just cached) until explicitly freed.  After ~13 batches
-        # × 2 GB = 26 GB, subsequent calls OOM.  del + empty_cache returns MPS
-        # allocations to the pool after each batch, keeping peak memory flat.
-        del gen_ids, enc_out, enc_hidden
+        # Release KV-cache tensors before the next batch to keep peak memory flat.
+        del gen_ids, enc_hidden
         gc.collect()
         _empty_cache(device)
         golds = chunk["target_text"]

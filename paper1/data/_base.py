@@ -139,9 +139,22 @@ def finalise(ds: Dataset, period: str, seed: int, n: int,
 
 # ── Text cleaning ─────────────────────────────────────────────────────────────
 
+import unicodedata as _unicodedata
+
 _WS_RE = re.compile(r'\s+')
 
 
 def clean_text(text: str) -> str:
-    """Collapse whitespace, strip leading/trailing."""
+    """Normalize Unicode, strip control characters, collapse whitespace.
+
+    NFKC normalization converts compatibility and composed variants to
+    canonical form.  Control characters (Unicode category Cc) except tab
+    and newline are removed — they are the primary trigger of the
+    'NormalizedString bad split' Rust panic in the tokenizers library.
+    """
+    text = _unicodedata.normalize('NFKC', text)
+    text = ''.join(
+        c for c in text
+        if _unicodedata.category(c) != 'Cc' or c in '\t\n'
+    )
     return _WS_RE.sub(' ', text).strip()

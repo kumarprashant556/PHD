@@ -301,19 +301,14 @@ def compute_percentile_length(
             enc = tokenizer(texts, truncation=True, max_length=hard_cap,
                             padding=False, add_special_tokens=True)
             lengths.extend(len(ids) for ids in enc["input_ids"])
-        except BaseException as _e:
-            # pyo3_runtime.PanicException (Rust panic) inherits from BaseException,
-            # not Exception, so bare `except Exception` won't catch it.
-            if isinstance(_e, (KeyboardInterrupt, SystemExit)):
-                raise
+        except Exception:
             for text in texts:
                 try:
                     enc = tokenizer(text, truncation=True, max_length=hard_cap,
                                     padding=False, add_special_tokens=True)
                     lengths.append(len(enc["input_ids"]))
-                except BaseException as _e2:
-                    if isinstance(_e2, (KeyboardInterrupt, SystemExit)):
-                        raise
+                except Exception:
+                    pass
 
     p_len  = int(_np.percentile(lengths, percentile))
     rounded = ((p_len + pad_to_multiple - 1) // pad_to_multiple) * pad_to_multiple

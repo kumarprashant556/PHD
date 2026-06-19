@@ -80,11 +80,10 @@ class B6LLaMAProExpansion:
         self._device     = device
         self._mem_tracker = MemoryTracker(device=device, method=self.name)
         load_kw = {"dtype": model_dtype(device, self.cfg)}
-        if "cuda" in device:
-            load_kw["device_map"] = "auto"
+        # Avoid device_map="auto" (Accelerate's dispatch_model mangles _modules
+        # on Python 3.12, causing TypeError in nn.Module.train()).
         model = AutoModelForSeq2SeqLM.from_pretrained(self.cfg.model_name, **load_kw)
-        if "device_map" not in load_kw:
-            model = model.to(device)
+        model = model.to(device)
         if hasattr(model.config, "pad_token_id"):
             model.config.pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
         self._model = model

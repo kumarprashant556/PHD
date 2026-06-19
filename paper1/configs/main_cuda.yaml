@@ -54,7 +54,7 @@ ppl_eval_frac:       0.10
 seed:                42
 log_every_n_steps:   25
 max_input_length:    256
-max_target_length:   0                    # 0 = auto: P95 token length scanned at startup
+max_target_length:   256                  # P95 of domain_sequential target lengths (confirmed by scan)
 max_new_tokens:      512                  # full generation: covers MetaMath chain-of-thought + answer
 
 # ── INCA block-chain growth ───────────────────────────────────────────────────

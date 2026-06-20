@@ -17,6 +17,30 @@ Usage (from repo root)
 
 from __future__ import annotations
 
+# ── Crash instrumentation + CUDA/Rayon hardening ──────────────────────────────
+# These MUST come before any import of torch, transformers, or tokenizers.
+# faulthandler: on SIGSEGV/SIGBUS print Python + C frames to stderr so we can
+#   see WHERE exactly the crash is, not just "Segmentation fault".
+# CUDA_MODULE_LOADING=LAZY: defer loading of CUDA kernel modules until first use.
+#   Prevents SIGSEGV when a prior crashed process left the CUDA driver in a
+#   degraded state (stale file-descriptor references to /dev/nvidia*).
+# TOKENIZERS_PARALLELISM=false + RAYON_NUM_THREADS=1: keep the Rust tokenizer
+#   library single-threaded.  Panics in Rayon worker threads cannot be caught by
+#   Python and kill the whole process with SIGSEGV.
+import faulthandler as _faulthandler
+import os as _os
+import sys as _sys
+
+_faulthandler.enable(file=_sys.stderr, all_threads=True)
+_os.environ.setdefault("CUDA_MODULE_LOADING",    "LAZY")
+_os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+_os.environ.setdefault("RAYON_NUM_THREADS",      "1")
+
+print(f"[startup] Python {_sys.version}", flush=True)
+print(f"[startup] pid={_os.getpid()}  CUDA_MODULE_LOADING={_os.environ['CUDA_MODULE_LOADING']}", flush=True)
+print("[startup] importing torch …", flush=True)
+# ──────────────────────────────────────────────────────────────────────────────
+
 import argparse
 import contextlib
 import csv
@@ -34,6 +58,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+print(f"[startup] torch {torch.__version__}  CUDA={torch.version.cuda}  device_count={torch.cuda.device_count()}", flush=True)
 from tqdm import tqdm
 from datasets import Dataset
 from transformers import AutoTokenizer, T5ForConditionalGeneration

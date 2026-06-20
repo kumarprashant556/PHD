@@ -464,29 +464,29 @@ def _answer_exact_match(pred: str, gold: str) -> float:
 
 @contextlib.contextmanager
 def _eval_ctx(model: "T5ForConditionalGeneration"):
-    """Context manager: put model in eval mode and restore use_cache.
+    """Set model to eval mode and restore training mode on exit.
 
-    GradientCheckpointingLayer.__call__ is patched at import time by _patch_gcl()
-    so it no longer crashes Python 3.12.  This context manager handles the remaining
-    eval-mode concerns: disabling GC overhead and ensuring use_cache=True so that
-    _greedy_decode can use the KV-cache path.
+    _patch_gcl() and _patch_module_train() applied at import time make
+    model.eval() / model.train() safe on Python 3.12.  This context manager
+    only needs to handle gradient-checkpointing bookkeeping.
+
+    Note: _greedy_decode always passes use_cache=False explicitly to avoid
+    the T5Attention flash-attention SIGSEGV that occurs with KV-cache growth.
     """
-    _gc_on       = getattr(model, "is_gradient_checkpointing", False)
-    _saved_cache = getattr(model.config, "use_cache", True)
+    _gc_on = getattr(model, "is_gradient_checkpointing", False)
     if _gc_on:
         model.gradient_checkpointing_disable()
-    model.config.use_cache = True
     model.eval()
     try:
         yield
     finally:
-        model.config.use_cache = _saved_cache
         model.train()
         if _gc_on:
             model.gradient_checkpointing_enable()
             model.enable_input_require_grads()
 
 
+@torch.no_grad()
 def _greedy_decode(
     model:     "T5ForConditionalGeneration",
     enc_hidden: torch.Tensor,
@@ -695,42 +695,46 @@ def _per_item_losses(
     pad_id = tokenizer.pad_token_id
     losses: List[float] = []
     ce_none = nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
-    for start in range(0, len(items), batch_size):
-        chunk = items[start: start + batch_size]
-        enc = tokenizer(
-            [it["input_text"] for it in chunk],
-            truncation=True, max_length=max_input_length,
-            padding=True, return_tensors="pt",
-        ).to(device)
-        dec = tokenizer(
-            text_target=[it["target_text"] for it in chunk],
-            truncation=True, max_length=max_target_length,
-            padding=True, return_tensors="pt",
-        )
-        labels = dec["input_ids"].to(device)
-        labels_masked = labels.clone()
-        labels_masked[labels_masked == pad_id] = -100
+    try:
+        for start in range(0, len(items), batch_size):
+            chunk = items[start: start + batch_size]
+            enc = tokenizer(
+                [it["input_text"] for it in chunk],
+                truncation=True, max_length=max_input_length,
+                padding=True, return_tensors="pt",
+            ).to(device)
+            dec = tokenizer(
+                text_target=[it["target_text"] for it in chunk],
+                truncation=True, max_length=max_target_length,
+                padding=True, return_tensors="pt",
+            )
+            labels = dec["input_ids"].to(device)
+            labels_masked = labels.clone()
+            labels_masked[labels_masked == pad_id] = -100
 
-        enc_hidden = manager(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"])
-        enc_out = BaseModelOutput(last_hidden_state=enc_hidden)
-        out = model(
-            encoder_outputs=enc_out,
-            attention_mask=enc["attention_mask"],
-            labels=labels_masked,
-        )
-        logits = out.logits           # (B, T, V)
-        B, T, V = logits.shape
-        flat_loss = ce_none(logits.reshape(B * T, V), labels_masked.reshape(B * T))
-        flat_loss = flat_loss.view(B, T)
-        valid = (labels_masked != -100).float()
-        per_item = (flat_loss * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
-        losses.extend(per_item.detach().cpu().tolist())
-        # Periodically release MPS allocator cache to prevent accumulation over
-        # up to 2 000 replay items (500 batches at batch_size=4).
-        del out, logits, flat_loss, valid, per_item, enc_out, enc_hidden
-        if (start // batch_size) % 50 == 49:   # every 200 items
-            gc.collect()
-            _empty_cache(device)
+            enc_hidden = manager(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"])
+            enc_out = BaseModelOutput(last_hidden_state=enc_hidden)
+            out = model(
+                encoder_outputs=enc_out,
+                attention_mask=enc["attention_mask"],
+                labels=labels_masked,
+            )
+            logits = out.logits           # (B, T, V)
+            B, T, V = logits.shape
+            flat_loss = ce_none(logits.reshape(B * T, V), labels_masked.reshape(B * T))
+            flat_loss = flat_loss.view(B, T)
+            valid = (labels_masked != -100).float()
+            per_item = (flat_loss * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+            losses.extend(per_item.detach().cpu().tolist())
+            # Periodically release MPS allocator cache to prevent accumulation over
+            # up to 2 000 replay items (500 batches at batch_size=4).
+            del out, logits, flat_loss, valid, per_item, enc_out, enc_hidden
+            if (start // batch_size) % 50 == 49:   # every 200 items
+                gc.collect()
+                _empty_cache(device)
+    finally:
+        model.train()
+        manager.train()
     return losses
 
 

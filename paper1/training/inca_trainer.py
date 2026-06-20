@@ -465,47 +465,43 @@ def _greedy_decode(
     max_new_tokens: int,
     device: str,
 ) -> torch.Tensor:
-    """Greedy T5 decode via T5ForConditionalGeneration.forward() with return_dict=False.
+    """Greedy T5 decode — no KV cache, full sequence re-fed each step.
 
-    Uses model() with pre-computed encoder outputs instead of model.generate():
-      - model.generate() hardcodes return_dict=True internally, creating
-        Seq2SeqLMOutput which crashes Python 3.12 via OrderedDict.__setattr__.
-      - model() with return_dict=False returns a plain tuple: no ModelOutput
-        is ever constructed anywhere in the call stack.
-      - Caller (_eval_accuracy) must enter _eval_ctx() first so that
-        GradientCheckpointingLayer wrappers are removed before this runs.
+    We intentionally do NOT use use_cache=True / past_key_values.  The
+    incremental KV-cache path in T5Attention triggers a CUDA kernel
+    SIGSEGV (invalid memory access in flash-attention) once the cache
+    grows large enough — observable reliably after ~100 training steps
+    even though the first two evals (steps 50, 100) complete successfully.
 
-    out[0] = lm_logits  (batch, seq_len, vocab)  — includes lm_head + scale
-    out[1] = past_key_values                      — nested tuple of KV tensors
+    Without KV cache:
+      - Each step feeds the full generated sequence to the decoder.
+      - out[0] = lm_logits (batch, current_len, vocab); we take [:, -1, :].
+      - past_key_values is None and absent from the output tuple.
+      - O(n²) computation, but negligible vs. training time for n ≤ 512.
     """
     batch     = enc_hidden.shape[0]
     dec_start = model.config.decoder_start_token_id
     eos_id    = model.config.eos_token_id or 1
 
-    dec_ids   = torch.full((batch, 1), dec_start, dtype=torch.long, device=device)
-    generated = dec_ids.clone()
-    past_kv   = None
+    generated = torch.full((batch, 1), dec_start, dtype=torch.long, device=device)
     done      = torch.zeros(batch, dtype=torch.bool, device=device)
 
     for _ in range(max_new_tokens):
         out = model(
-            encoder_outputs=(enc_hidden,),   # tuple: (last_hidden_state,)
-            attention_mask=attn_mask,
-            decoder_input_ids=dec_ids,
-            past_key_values=past_kv,
-            use_cache=True,
-            return_dict=False,               # plain tuple — no ModelOutput created
+            encoder_outputs=(enc_hidden,),   # (last_hidden_state,) — skips encoder
+            attention_mask=attn_mask,        # encoder attention mask for cross-attn
+            decoder_input_ids=generated,     # full sequence so far; grows by 1/step
+            use_cache=False,                 # no KV cache — avoids flash-attn SIGSEGV
+            return_dict=False,               # plain tuple, no ModelOutput created
         )
-        # With return_dict=False and no labels: out = (logits, past_kv, enc_hidden)
-        logits  = out[0]                     # (batch, seq_len, vocab)
-        past_kv = out[1]                     # nested KV tuple for next step
-
-        next_tok  = logits[:, -1, :].argmax(-1, keepdim=True)   # (batch, 1)
+        # return_dict=False, use_cache=False, no labels:
+        #   out[0] = lm_logits  (batch, current_len, vocab)
+        logits   = out[0][:, -1, :]              # last-position logits (batch, vocab)
+        next_tok = logits.argmax(-1, keepdim=True)  # (batch, 1)
         generated = torch.cat([generated, next_tok], dim=1)
         done     |= next_tok.squeeze(-1) == eos_id
         if done.all():
             break
-        dec_ids = next_tok
 
     return generated
 

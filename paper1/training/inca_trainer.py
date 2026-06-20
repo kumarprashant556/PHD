@@ -18,6 +18,7 @@ Usage (from repo root)
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import dataclasses
 import gc
@@ -322,6 +323,36 @@ def _answer_exact_match(pred: str, gold: str) -> float:
 # ──────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
+@contextlib.contextmanager
+def _eval_ctx(model: "T5ForConditionalGeneration"):
+    """Context manager: put model in eval mode and neutralise gradient-checkpointing.
+
+    gradient_checkpointing_enable() wraps each decoder block with a
+    GradientCheckpointingLayer whose __call__ does super().__call__().
+    On Python 3.12 that super() call corrupts nn.Module._modules lookup,
+    giving 'TypeError: unhashable type: dict'.  model.eval() alone does NOT
+    remove the wrappers.  We must explicitly disable GC before generation
+    and restore it afterwards.
+
+    Also restores model.config.use_cache=True which GC sets to False —
+    _greedy_decode needs the KV-cache path to be enabled.
+    """
+    _gc_on        = getattr(model, "is_gradient_checkpointing", False)
+    _saved_cache  = getattr(model.config, "use_cache", True)
+    if _gc_on:
+        model.gradient_checkpointing_disable()
+    model.config.use_cache = True
+    model.eval()
+    try:
+        yield
+    finally:
+        model.config.use_cache = _saved_cache
+        model.train()
+        if _gc_on:
+            model.gradient_checkpointing_enable()
+            model.enable_input_require_grads()
+
+
 def _greedy_decode(
     model:     "T5ForConditionalGeneration",
     enc_hidden: torch.Tensor,
@@ -329,19 +360,22 @@ def _greedy_decode(
     max_new_tokens: int,
     device: str,
 ) -> torch.Tensor:
-    """Greedy T5 decode calling model.decoder directly with return_dict=False.
+    """Greedy T5 decode via T5ForConditionalGeneration.forward() with return_dict=False.
 
-    Bypasses model.generate() which internally creates Seq2SeqLMOutput via
-    transformers' _sample code-path.  On Python 3.12 + certain transformers
-    versions, Seq2SeqLMOutput.__setattr__ raises TypeError due to a
-    ModelOutput / OrderedDict incompatibility.  Calling model.decoder with
-    return_dict=False returns a plain tuple — no ModelOutput is ever created.
+    Uses model() with pre-computed encoder outputs instead of model.generate():
+      - model.generate() hardcodes return_dict=True internally, creating
+        Seq2SeqLMOutput which crashes Python 3.12 via OrderedDict.__setattr__.
+      - model() with return_dict=False returns a plain tuple: no ModelOutput
+        is ever constructed anywhere in the call stack.
+      - Caller (_eval_accuracy) must enter _eval_ctx() first so that
+        GradientCheckpointingLayer wrappers are removed before this runs.
+
+    out[0] = lm_logits  (batch, seq_len, vocab)  — includes lm_head + scale
+    out[1] = past_key_values                      — nested tuple of KV tensors
     """
     batch     = enc_hidden.shape[0]
     dec_start = model.config.decoder_start_token_id
     eos_id    = model.config.eos_token_id or 1
-    # T5 scales decoder hidden state before lm_head when tie_word_embeddings=True
-    scale     = model.model_dim ** -0.5 if model.config.tie_word_embeddings else 1.0
 
     dec_ids   = torch.full((batch, 1), dec_start, dtype=torch.long, device=device)
     generated = dec_ids.clone()
@@ -349,20 +383,19 @@ def _greedy_decode(
     done      = torch.zeros(batch, dtype=torch.bool, device=device)
 
     for _ in range(max_new_tokens):
-        dec_out = model.decoder(
-            input_ids=dec_ids,
-            encoder_hidden_states=enc_hidden,
-            encoder_attention_mask=attn_mask,
+        out = model(
+            encoder_outputs=(enc_hidden,),   # tuple: (last_hidden_state,)
+            attention_mask=attn_mask,
+            decoder_input_ids=dec_ids,
             past_key_values=past_kv,
             use_cache=True,
-            return_dict=False,          # plain tuple → no ModelOutput creation
+            return_dict=False,               # plain tuple — no ModelOutput created
         )
-        hidden  = dec_out[0]            # [batch, 1, d_model]
-        past_kv = dec_out[1]            # nested tuple of KV tensors
+        # With return_dict=False and no labels: out = (logits, past_kv, enc_hidden)
+        logits  = out[0]                     # (batch, seq_len, vocab)
+        past_kv = out[1]                     # nested KV tuple for next step
 
-        logits   = model.lm_head(hidden[:, -1:, :] * scale)   # [batch, 1, vocab]
-        next_tok = logits.squeeze(1).argmax(-1, keepdim=True)  # [batch, 1]
-
+        next_tok  = logits[:, -1, :].argmax(-1, keepdim=True)   # (batch, 1)
         generated = torch.cat([generated, next_tok], dim=1)
         done     |= next_tok.squeeze(-1) == eos_id
         if done.all():
@@ -395,12 +428,6 @@ def _eval_accuracy(
     exact_match — exact match on extracted final answer (handles
                   "#### X" and "The answer is X" patterns); 0.0 for
                   code targets where no answer marker exists.
-
-    Note on max_new_tokens:
-      Both saturation checks and post-period eval use cfg.max_new_tokens
-      (dynamically set from the P95 target-length scan at startup, default 256).
-      This ensures exact_match can reach the answer marker in long chain-of-thought
-      tasks. sat_max_new_tokens is no longer used as a separate field.
     """
     if len(eval_ds) == 0:
         return EvalResult(0.0, 0.0)
@@ -410,44 +437,43 @@ def _eval_accuracy(
         indices = random.sample(indices, n_samples)
     subset = eval_ds.select(indices)
 
-    model.eval()
-    manager.eval()
     total_f1 = 0.0
     total_em = 0.0
     total    = 0
 
-    for start in range(0, len(subset), batch_size):
-        chunk  = subset.select(range(start, min(start + batch_size, len(subset))))
-        inputs = tokenizer(
-            list(chunk["input_text"]),   # datasets≥5.0 returns Column, not list
-            truncation=True,
-            max_length=max_input_length,
-            padding=True,
-            return_tensors="pt",
-        )
-        inputs = _batch_to_device(inputs, device)
-
-        with torch.autocast(device_type=amp_dev, dtype=amp_dtype, enabled=amp_enabled):
-            enc_hidden = manager(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
+    with _eval_ctx(model):
+        manager.eval()
+        for start in range(0, len(subset), batch_size):
+            chunk  = subset.select(range(start, min(start + batch_size, len(subset))))
+            inputs = tokenizer(
+                list(chunk["input_text"]),
+                truncation=True,
+                max_length=max_input_length,
+                padding=True,
+                return_tensors="pt",
             )
-            gen_ids = _greedy_decode(
-                model, enc_hidden, inputs["attention_mask"], max_new_tokens, device
-            )
-        preds = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        # Release KV-cache tensors before the next batch to keep peak memory flat.
-        del gen_ids, enc_hidden
-        gc.collect()
-        _empty_cache(device)
-        golds = chunk["target_text"]
+            inputs = _batch_to_device(inputs, device)
 
-        for pred, gold in zip(preds, golds):
-            gold_str  = str(gold)
-            total    += 1
-            total_f1 += _token_f1(pred, gold_str)
-            total_em += _answer_exact_match(pred, gold_str)
+            with torch.autocast(device_type=amp_dev, dtype=amp_dtype, enabled=amp_enabled):
+                enc_hidden = manager(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                )
+                gen_ids = _greedy_decode(
+                    model, enc_hidden, inputs["attention_mask"], max_new_tokens, device
+                )
+            preds = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+            del gen_ids, enc_hidden
+            gc.collect()
+            _empty_cache(device)
+            golds = chunk["target_text"]
 
+            for pred, gold in zip(preds, golds):
+                total    += 1
+                total_f1 += _token_f1(pred, str(gold))
+                total_em += _answer_exact_match(pred, str(gold))
+
+    manager.train()
     n = max(1, total)
     return EvalResult(token_f1=total_f1 / n, exact_match=total_em / n)
 

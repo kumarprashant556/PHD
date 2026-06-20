@@ -17,28 +17,88 @@ Usage (from repo root)
 
 from __future__ import annotations
 
-# ── Crash instrumentation + CUDA/Rayon hardening ──────────────────────────────
-# These MUST come before any import of torch, transformers, or tokenizers.
-# faulthandler: on SIGSEGV/SIGBUS print Python + C frames to stderr so we can
-#   see WHERE exactly the crash is, not just "Segmentation fault".
-# CUDA_MODULE_LOADING=LAZY: defer loading of CUDA kernel modules until first use.
-#   Prevents SIGSEGV when a prior crashed process left the CUDA driver in a
-#   degraded state (stale file-descriptor references to /dev/nvidia*).
-# TOKENIZERS_PARALLELISM=false + RAYON_NUM_THREADS=1: keep the Rust tokenizer
-#   library single-threaded.  Panics in Rayon worker threads cannot be caught by
-#   Python and kill the whole process with SIGSEGV.
+# ── Crash hardening: must run before ANY other import ─────────────────────────
+#
+# Root-cause chain that has been observed:
+#   1. A prior job crashes with SIGSEGV while Python is writing a .pyc file.
+#      The file is left on disk in a partially-written, corrupt state.
+#   2. The next job starts.  Python reads the corrupt .pyc, detects a checksum
+#      mismatch, and falls back to compiling the source with compile().
+#   3. compile() stack-overflows inside CPython's C code while processing numpy
+#      or pandas source files that have deeply-nested type annotations.
+#      The default Linux stack limit (8 MB) is too small for Python 3.12's
+#      new bytecode compiler on these files. SIGSEGV.
+#
+# Fixes applied here (in order, before any third-party import):
+#   A. faulthandler: print full Python+C traceback on SIGSEGV instead of
+#      just "Segmentation fault" — allows future crash diagnosis.
+#   B. resource.setrlimit(RLIMIT_STACK): raise the C stack limit to 256 MB
+#      in this process, so compile() no longer overflows.
+#   C. Pre-compile pandas + numpy in a subprocess that runs with
+#      `ulimit -s unlimited` (bash shell limit, inherited before Python
+#      starts).  This regenerates all .pyc files so compile() is NEVER
+#      called inside our process for these packages.
+#   D. CUDA_MODULE_LOADING=LAZY: defer CUDA kernel loading to first use.
+#      Prevents CUDA-driver SIGSEGV when zombie processes from prior crashes
+#      still hold /dev/nvidia* file descriptors.
+#   E. TOKENIZERS_PARALLELISM=false + RAYON_NUM_THREADS=1: keep the Rust
+#      tokenizer single-threaded. Rayon worker panics kill the process with
+#      uncatchable SIGSEGV.
+
 import faulthandler as _faulthandler
 import os as _os
+import resource as _resource
+import subprocess as _subprocess
 import sys as _sys
+import sysconfig as _sysconfig
 
+# A. Enable fault handler
 _faulthandler.enable(file=_sys.stderr, all_threads=True)
+
+# B. Raise stack limit to 256 MB in this process
+try:
+    _soft, _hard = _resource.getrlimit(_resource.RLIMIT_STACK)
+    _target = 256 * 1024 * 1024          # 256 MB
+    _new_soft = (_resource.RLIM_INFINITY
+                 if _hard == _resource.RLIM_INFINITY or _hard >= _target
+                 else _hard)
+    if _soft != _resource.RLIM_INFINITY and _soft < _target:
+        _resource.setrlimit(_resource.RLIMIT_STACK, (_new_soft, _hard))
+        print(f"[startup] stack limit raised: {_soft // 1024} KB → {_new_soft if _new_soft == _resource.RLIM_INFINITY else str(_new_soft // 1024) + ' KB'}", flush=True)
+    else:
+        print(f"[startup] stack limit already sufficient: {_soft}", flush=True)
+except Exception as _e:
+    print(f"[startup] could not raise stack limit: {_e}", flush=True)
+
+# C. Pre-compile pandas + numpy .pyc in a subprocess with unlimited stack.
+#    After this, our process loads .pyc files directly; compile() is never
+#    called for these packages, regardless of this process's stack limit.
+_sp = _sysconfig.get_path("purelib")  # e.g. .../site-packages
+if _sp:
+    print(f"[startup] pre-compiling numpy + pandas in {_sp} …", flush=True)
+    _rc = _subprocess.run(
+        ["bash", "-c",
+         f"ulimit -s unlimited && "
+         f'"{_sys.executable}" -W ignore -m compileall -q -l '
+         f'"{_sp}/numpy" "{_sp}/pandas" 2>/dev/null'],
+        timeout=180,
+        capture_output=True,
+    )
+    print(f"[startup] pre-compile done  rc={_rc.returncode}", flush=True)
+    if _rc.stderr:
+        print(f"[startup] pre-compile stderr: {_rc.stderr.decode(errors='replace')[:400]}", flush=True)
+else:
+    print("[startup] WARNING: could not find site-packages; skipping pre-compile", flush=True)
+
+# D + E. Environment variables
 _os.environ.setdefault("CUDA_MODULE_LOADING",    "LAZY")
 _os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 _os.environ.setdefault("RAYON_NUM_THREADS",      "1")
 
 print(f"[startup] Python {_sys.version}", flush=True)
-print(f"[startup] pid={_os.getpid()}  CUDA_MODULE_LOADING={_os.environ['CUDA_MODULE_LOADING']}", flush=True)
+print(f"[startup] pid={_os.getpid()}", flush=True)
 print("[startup] importing torch …", flush=True)
+del _faulthandler, _resource, _subprocess, _sysconfig
 # ──────────────────────────────────────────────────────────────────────────────
 
 import argparse
@@ -58,7 +118,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-print(f"[startup] torch {torch.__version__}  CUDA={torch.version.cuda}  device_count={torch.cuda.device_count()}", flush=True)
+print(f"[startup] torch {torch.__version__}  CUDA={torch.version.cuda}", flush=True)
 from tqdm import tqdm
 from datasets import Dataset
 from transformers import AutoTokenizer, T5ForConditionalGeneration

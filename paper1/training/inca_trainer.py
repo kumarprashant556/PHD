@@ -55,6 +55,32 @@ from data.tokenizer import build_tokenized_periods, make_dataloader, make_replay
 from training.memory_tracker import MemoryTracker
 
 
+def _patch_gcl() -> None:
+    """Fix GradientCheckpointingLayer.__call__ to not crash on Python 3.12.
+
+    In newer transformers, T5Block modules are wrapped with GradientCheckpointingLayer
+    at model-load time (not only when gradient_checkpointing_enable() is called).
+    Its __call__ does:
+        return super().__call__(*args, **kwargs)
+    On Python 3.12, super() in a magic method override that sits above a C-extension
+    base class (nn.Module.__call__ is _wrapped_call_impl in C) corrupts the MRO
+    lookup and ends up calling __getattr__ on self._modules with a dict as the key,
+    giving 'TypeError: unhashable type: dict'.
+    gradient_checkpointing_disable() only sets a flag inside the wrapper; it does NOT
+    remove the wrapper. We patch __call__ once to use an explicit nn.Module.__call__
+    dispatch that bypasses the super() resolution entirely.
+    """
+    try:
+        from transformers.modeling_layers import GradientCheckpointingLayer as _GCL
+        _base = nn.Module.__call__
+        _GCL.__call__ = lambda self, *a, **kw: _base(self, *a, **kw)
+    except (ImportError, AttributeError):
+        pass
+
+
+_patch_gcl()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Simple run logger (replaces Phase0 RunLogger)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -322,23 +348,17 @@ def _answer_exact_match(pred: str, gold: str) -> float:
 # Evaluation — greedy decode + token-F1 over raw (un-tokenized) Dataset
 # ──────────────────────────────────────────────────────────────────────────────
 
-@torch.no_grad()
 @contextlib.contextmanager
 def _eval_ctx(model: "T5ForConditionalGeneration"):
-    """Context manager: put model in eval mode and neutralise gradient-checkpointing.
+    """Context manager: put model in eval mode and restore use_cache.
 
-    gradient_checkpointing_enable() wraps each decoder block with a
-    GradientCheckpointingLayer whose __call__ does super().__call__().
-    On Python 3.12 that super() call corrupts nn.Module._modules lookup,
-    giving 'TypeError: unhashable type: dict'.  model.eval() alone does NOT
-    remove the wrappers.  We must explicitly disable GC before generation
-    and restore it afterwards.
-
-    Also restores model.config.use_cache=True which GC sets to False —
-    _greedy_decode needs the KV-cache path to be enabled.
+    GradientCheckpointingLayer.__call__ is patched at import time by _patch_gcl()
+    so it no longer crashes Python 3.12.  This context manager handles the remaining
+    eval-mode concerns: disabling GC overhead and ensuring use_cache=True so that
+    _greedy_decode can use the KV-cache path.
     """
-    _gc_on        = getattr(model, "is_gradient_checkpointing", False)
-    _saved_cache  = getattr(model.config, "use_cache", True)
+    _gc_on       = getattr(model, "is_gradient_checkpointing", False)
+    _saved_cache = getattr(model.config, "use_cache", True)
     if _gc_on:
         model.gradient_checkpointing_disable()
     model.config.use_cache = True

@@ -166,6 +166,35 @@ def _patch_gcl() -> None:
 _patch_gcl()
 
 
+def _patch_module_train() -> None:
+    """Fix nn.Module.train to not use _modules.items() which crashes Python 3.12.
+
+    nn.Module.train() calls children() → named_children() → self._modules.items().
+    On Python 3.12, iterating _modules.items() on certain module types (e.g. modules
+    that were wrapped by GradientCheckpointingLayer at load time) returns wrong objects
+    — e.g. a bare NewGELUActivation instead of a (name, module) tuple — causing:
+        TypeError: 'NewGELUActivation' object is not iterable
+    at the 'for name, module in self._modules.items()' line.
+
+    Fix: replace nn.Module.train with an implementation that iterates _modules KEYS
+    only (via list(dict) which uses __iter__, not .items()) and then fetches values
+    via dict.get().  This avoids the broken items() iterator entirely.
+    """
+    def _safe_train(self, mode: bool = True):
+        self.__dict__['training'] = mode
+        mods = self.__dict__.get('_modules', {})
+        for k in list(mods):              # iterate KEYS — safe on Python 3.12
+            child = mods.get(k)
+            if child is not None and isinstance(child, nn.Module):
+                child.train(mode)         # recursive; uses this patched version
+        return self
+
+    nn.Module.train = _safe_train
+
+
+_patch_module_train()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Simple run logger (replaces Phase0 RunLogger)
 # ──────────────────────────────────────────────────────────────────────────────

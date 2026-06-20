@@ -34,6 +34,61 @@ Job counts
 
 from __future__ import annotations
 
+# ── Crash hardening — must run before ANY third-party import ──────────────────
+# run.py is the sweep orchestrator.  It calls `import torch` at module level
+# (inside _detect_device) before inca_trainer.py's hardening block runs, so
+# we must repeat the essential parts here.
+#
+# Recurring failure mode:
+#   A training job crashes mid-SIGSEGV while Python is writing a .pyc file
+#   (e.g. torch/library.py, torch/_meta_registrations.py).  The next run reads
+#   the truncated .pyc, deserialises wrong objects (e.g. str instead of a C
+#   extension callable), and crashes:
+#       TypeError: 'str' object is not callable
+#   at `self.m.impl(...)` inside torch/library.py.
+#
+# Fix: pre-compile numpy, pandas, AND torch (top-level) in a subprocess with
+# `ulimit -s unlimited` so (a) the .pyc files are regenerated from clean source
+# and (b) any stack-overflow during compile() is handled in the child, not here.
+import faulthandler as _fh
+import os as _os
+import resource as _res
+import subprocess as _sp
+import sys as _sys
+import sysconfig as _sc
+
+_fh.enable(file=_sys.stderr, all_threads=True)
+
+try:
+    _soft, _hard = _res.getrlimit(_res.RLIMIT_STACK)
+    _target = 256 * 1024 * 1024
+    _new_soft = (_res.RLIM_INFINITY
+                 if _hard == _res.RLIM_INFINITY or _hard >= _target else _hard)
+    if _soft != _res.RLIM_INFINITY and _soft < _target:
+        _res.setrlimit(_res.RLIMIT_STACK, (_new_soft, _hard))
+except Exception:
+    pass
+
+_site = _sc.get_path("purelib")
+if _site:
+    # numpy + pandas: deep annotations cause compile() stack overflow on Py 3.12
+    # torch (top-level only, -l): library.py / _meta_registrations.py / __init__.py
+    # are routinely corrupted by SIGSEGV crashes mid-write.
+    _sp.run(
+        ["bash", "-c",
+         f'ulimit -s unlimited && '
+         f'"{_sys.executable}" -W ignore -m compileall -q -l '
+         f'"{_site}/numpy" "{_site}/pandas" "{_site}/torch" 2>/dev/null'],
+        timeout=300, capture_output=True,
+    )
+
+_os.environ.setdefault("CUDA_MODULE_LOADING",    "LAZY")
+_os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+_os.environ.setdefault("RAYON_NUM_THREADS",      "1")
+
+del _fh, _res, _sp, _sc
+# ──────────────────────────────────────────────────────────────────────────────
+
 import argparse
 import json
 import os

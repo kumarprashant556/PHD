@@ -75,13 +75,13 @@ except Exception as _e:
 #    called for these packages, regardless of this process's stack limit.
 _sp = _sysconfig.get_path("purelib")  # e.g. .../site-packages
 if _sp:
-    print(f"[startup] pre-compiling numpy + pandas in {_sp} …", flush=True)
+    print(f"[startup] pre-compiling numpy + pandas + torch in {_sp} …", flush=True)
     _rc = _subprocess.run(
         ["bash", "-c",
          f"ulimit -s unlimited && "
          f'"{_sys.executable}" -W ignore -m compileall -q -l '
-         f'"{_sp}/numpy" "{_sp}/pandas" 2>/dev/null'],
-        timeout=180,
+         f'"{_sp}/numpy" "{_sp}/pandas" "{_sp}/torch" 2>/dev/null'],
+        timeout=300,
         capture_output=True,
     )
     print(f"[startup] pre-compile done  rc={_rc.returncode}", flush=True)
